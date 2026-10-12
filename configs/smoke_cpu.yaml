@@ -1,0 +1,15 @@
+# Plumbing test only: 1 epoch on 256 images, CPU. Scores are meaningless.
+search:
+  max_rounds: 2
+  min_improvement: 0.0
+  noise_level: 0.2
+runner:
+  mmpretrain_root: ~/cls_smoke/mmpretrain
+  epochs: 1
+  warmup_epochs: 0
+  batch_size: 32
+  device: cpu
+  train_subset: 256
+  val_subset: 200
+  num_workers: 2
+  timeout_s: 1800

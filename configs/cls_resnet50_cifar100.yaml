@@ -1,0 +1,33 @@
+# CIFAR-100 ResNet-50 (MMPretrain official recipe), proxy search on 1 GPU.
+# Usage: python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
+search:
+  max_rounds: 20             # same trial budget for every method
+  min_improvement: 0.2       # >= proxy seed std; measure it first (see README) and update
+  noise_level: 0.2
+  early_stop_patience: 0     # keep 0 in method comparisons
+  max_consecutive_failures: 5
+
+agent:
+  client:
+    provider: anthropic      # needs ANTHROPIC_API_KEY
+    model: claude-opus-5-5
+    effort: medium
+    use_fallbacks: true      # server-side refusal fallback; served_model is logged per call
+  search:
+    reflect_every_n: 2
+    recent_n: 4
+    mutation_budget: 1
+    stagnation_budget: 2
+    stagnation_rounds: 3
+    explore_every: 4
+
+runner:
+  mmpretrain_root: /root/mmpretrain          # checkout with tools/train.py and data/cifar100
+  base_config: configs/resnet/resnet50_8xb16_cifar100.py
+  epochs: 30
+  warmup_epochs: 1
+  batch_size: 128
+  lr: 0.1
+  amp: true
+  num_workers: 8
+  timeout_s: 21600
