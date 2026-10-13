@@ -55,11 +55,21 @@ export PYTHONPATH=$PWD
    ```bash
    python run_search.py --mode agent_reflect --dry_run
    ```
-2. Measure the proxy noise, then write the std into `noise_level` / `min_improvement` in the yaml:
-   ```bash
-   python tools/measure_noise.py --config configs/cls_resnet50_cifar100.yaml --seeds 0 1 2
-   ```
-3. Formal search. Every method gets the same budget (`max_rounds: 10` in the yaml) and seeds 0/1/2:
+2. Preconditions, before any search:
+   - Measure the proxy noise, then write the std into `noise_level` / `min_improvement` in the yaml:
+     ```bash
+     python tools/measure_noise.py --config configs/cls_resnet50_cifar100.yaml --seeds 0 1 2
+     ```
+   - Check that the proxy ranks like full training: train 16 architectures (baseline included) with both recipes, then analyse. Tau with a bootstrap CI, and whether the proxy's top picks keep their lead; lengthen the proxy if it fails:
+     ```bash
+     python tools/proxy_reliability.py sample --n 16 --seed 0
+     python tools/proxy_reliability.py analyze --csv runs/proxy_check/scores.csv --top_k 3
+     ```
+   - Check that signature de-duplication matches the real compute graph (CPU only; done 2026-10-13: 90 combinations → 86 distinct networks, dedup exact, 85 candidates besides the baseline):
+     ```bash
+     python tools/check_equivalence.py --config configs/cls_resnet50_cifar100.yaml
+     ```
+3. Search. Pilot with the yaml's `max_rounds: 10`; the formal classification comparison adds `--max_rounds 30`. Seeds 0/1/2:
    ```bash
    export DEEPSEEK_API_KEY=...         # set it yourself in the shell (e.g. ~/.bashrc); never commit it
    # (with --provider anthropic: export ANTHROPIC_API_KEY=... instead)
@@ -80,8 +90,14 @@ export PYTHONPATH=$PWD
    | D-6 rule-based "reflection" (LLMENAS trigger: no improvement → change direction, improvement → refine) | `--reflection_style rule` |
    | D-7 immediate reflection without memory (RZ-NAS style) | `--reflection_style immediate` |
    | Design Agent without the cost table | `--no_param_costs` |
+   | D-8 fixed principles: generic ones from the module papers (`configs/principles_fixed_cls.json`), never updated | `--principle_mode fixed` |
+   | D-9 random principles in the same format, never updated | `--principle_mode random` |
+   | D-10 principles induced as usual, confidence never updated | `--principle_mode no_update` |
    | Principle transfer | `--init_principles runs/<other run>/principle_memory.json` (also works for `--mode lapt`) |
-   | Budget sensitivity | `--max_rounds 30` |
+   | Transfer control: randomly initialised principles, updated as usual | `--init_principles random` |
+   | Formal budget | `--max_rounds 30` |
+   | Thinking-mode control (main runs have thinking off) | `--thinking on` |
+   | NADER with its original 90%-of-parent trigger | `--mode nader --nader_threshold orig` |
 5. Comparison table:
    ```bash
    python tools/compare_runs.py --runs runs --task classification --out runs/comparison
@@ -110,16 +126,18 @@ All are re-implemented under our search space (the official code of every LLM me
 | Random (Li & Talwalkar, UAI 2019) | uniform sampling | without replacement | none |
 | Reg-Evo (Real et al., AAAI 2019) | P=100, S=25, 20k models | P=4, S=2: 4 random, then tournament + 1-dimension mutation, oldest removed | population scaled to the budget |
 | TPE (Bergstra et al., NeurIPS 2011) | 200 trials, first 30 random | Optuna TPESampler, categorical, `n_startup_trials=3` | Optuna's default of 10 startup trials would be the whole budget |
-| GENIUS (Zheng et al., 2023) | one GPT-4 conversation, temperature 0, 10 iterations | one conversation, structured JSON, rebuilt from memory each round; temperature 0 requested | temperature applies only with DeepSeek `--thinking off`; generic expert persona; no human transcription step |
-| EvoPrompting (Chen et al., NeurIPS 2023) | 10 rounds × 160 children, top-10 parents, 2-shot, prompt-tuning, mixed temperature | 2 generations × 5 children, top-4, 2-shot, target metrics (90% params / 102% accuracy), fitness −params × error | no soft prompt-tuning (API model); temperature mixing applies only with DeepSeek `--thinking off` |
+| GENIUS (Zheng et al., 2023) | one GPT-4 conversation, temperature 0, 10 iterations | one conversation, structured JSON, rebuilt from memory each round; temperature 0 | temperature has no effect in the `--thinking on` control; generic expert persona; no human transcription step |
+| EvoPrompting (Chen et al., NeurIPS 2023) | 10 rounds × 160 children, top-10 parents, 2-shot, prompt-tuning, mixed temperature | 2 generations × 5 children, top-4, 2-shot, target metrics (90% params / 102% accuracy), fitness −params × error | no soft prompt-tuning (API model); temperature mixing has no effect in the `--thinking on` control |
 | LLMatic (Nasir et al., GECCO 2024) | network archive 100 CVT niches (width/depth, FLOPs); prompt archive (16 prompts × temperature); 2000 evaluations | network archive 3×3 (Δparams bin × target_stage); prompt archive (13 instructions × temperature 0.3/0.6/0.9 when temperature applies, else × effort low/medium/high); mutation 0.7 / crossover 0.3; curiosity +1 / −0.5 / −1 | archives scaled down; effort replaces temperature in thinking mode; instructions re-worded for our space; code-vs-paper differences resolved in favour of the paper |
 | LAPT (Zhou et al., AAAI 2025) | principles from 50 top architectures of a previous task, ≤2 options per layer, REA, adaptation per iteration | 3 random trials (or `--init_principles` for the transfer setting), principles → ≤2 options per dimension, REA (P=2, S=2) inside, adaptation every 2 trials with the top-2 | fewer samples to learn from |
-| NADER (Yang et al., CVPR 2025) | Reader + Proposer + Modifier + Reflector on computation graphs; experience store built offline, OpenAI embeddings | no Reader (LLM proposes 10 inspirations); Proposer picks (parent, inspiration) from the tree; Modifier applies it with top-5 retrieved experiences; failures reflected every 2 trials | config space instead of graphs (no development reflector); drop threshold = noise level instead of 90% of the parent (`drop_threshold: null` restores it); bag-of-words retrieval |
+| NADER (Yang et al., CVPR 2025) | Reader + Proposer + Modifier + Reflector on computation graphs; experience store built offline, OpenAI embeddings | no Reader (LLM proposes 10 inspirations); Proposer picks (parent, inspiration) from the tree; Modifier applies it with top-5 retrieved experiences; failures reflected every 2 trials | config space instead of graphs (no development reflector); drop threshold = noise level instead of 90% of the parent (`--nader_threshold orig` runs the original rule; report both); bag-of-words retrieval |
+
+All of these are adaptations to our search space, not faithful reproductions; the paper must say so and list every change.
 
 ## Design decisions
 
 - **Fairness.** All methods share the same search space, the same runner, the same trial budget and the same seeds. Early stopping is off by default (`early_stop_patience: 0`).
-- **Budget.** `max_rounds: 10`, as in the research plan. Population-based methods are scaled down accordingly (table above); the `--max_rounds 30` sensitivity run checks that the conclusions hold with a larger budget.
+- **Budget.** `max_rounds: 10` for the pilot only. The formal classification comparison uses `--max_rounds 30`, because population-based methods (Reg-Evo, LLMatic) cannot work properly with 10. Equal trial counts are not the whole story: report GPU hours and LLM calls / tokens (`search_summary.json`) and every change made to the original methods.
 - **Noise.** A new best must beat the previous one by at least `min_improvement`, which should be ≥ the proxy seed std. The noise level is also passed to both agents, so they don't chase noise.
 - **Cost awareness.** The Design Agent sees the parameter change of every candidate move (computed once by building all 86 models on CPU, cached in `param_table.json`). Results should always be reported as accuracy *and* Δparams.
 - **Failure protection.**
@@ -128,17 +146,19 @@ All are re-implemented under our search space (the official code of every LLM me
   - A failed reflection does not stop the search.
   - A wrong API key or invalid request (`AgentClientFatal`) stops the search immediately, so GPU time is not spent on the fallback.
   - Five consecutive failures stop the search.
-- **LLM.** Defaults to DeepSeek V4.1 Flash (`deepseek-flash`, OpenAI-compatible API, key in `DEEPSEEK_API_KEY`) in thinking mode. DeepSeek's JSON mode guarantees valid JSON but not the schema, so the schema is written into the system prompt and every answer is validated (invalid → one retry with feedback → legal fallback, counted in `n_fallback_proposals`). In thinking mode DeepSeek ignores temperature; `--thinking off` makes the baselines' temperatures (GENIUS 0, EvoPrompting mixed, LLMatic levels) take effect. All methods in one comparison must use the same LLM setting. `--provider anthropic` switches to `claude-opus-5-5` (schema enforced server-side, refusal fallback on, no temperature). Every call is logged with tokens (incl. reasoning tokens), latency and the model that answered.
+- **LLM.** DeepSeek V4.1 Flash (`deepseek-flash`, OpenAI-compatible API, key in `DEEPSEEK_API_KEY`), **thinking off for the main comparison** (yaml `thinking: false`), so the baselines' temperatures (GENIUS 0, EvoPrompting mixed, LLMatic levels) take effect as in the papers; `--thinking on` is a separate control (run directories tagged `think`). DeepSeek's JSON mode guarantees valid JSON but not the schema, so the schema is written into the system prompt and every answer is validated (invalid → one retry with feedback → legal fallback, counted in `n_fallback_proposals`). Responses are requested as gzip/deflate only (old `brotlipy` in conda base breaks the HTTP client's brotli decoder). All methods in one comparison must use the same model version and LLM setting. `--provider anthropic` switches to `claude-opus-5-5` (schema enforced server-side, refusal fallback on, no temperature). Every call is logged with tokens (incl. reasoning tokens), latency and the model that answered.
 - **Principle confidence.** Update rule after HypoExplore (Koo et al. 2026): supports c ← c + 0.2·s·(1−c), contradicts c ← c − 0.2·s·c, new principles start at 0.5, confirmed > 0.75, refuted < 0.25. Only trials since the previous reflection count as new evidence, and each principle gets at most one update per reflection, so no trial is counted twice.
 
 ## Status
 
 - [x] Innovations 1 and 2, classification runner, resume, reporting
-- [x] Cost table for the Design Agent; ablations D-1 … D-7
+- [x] Cost table for the Design Agent; ablations D-1 … D-10
 - [x] All 8 comparison methods (Random, Reg-Evo, TPE, GENIUS, EvoPrompting, LLMatic, LAPT, NADER)
 - [x] `tools/compare_runs.py` (mean ± std, invalid-trial rate, multiple of random search)
 - [x] Tested: dry runs of all 10 modes and every ablation flag; an interrupted-and-resumed run equals an uninterrupted one for every mode; all 86 architectures build in MMPretrain; a real end-to-end CPU training smoke test (earlier commit)
 - [x] DeepSeek V4.1 Flash provider (tested offline against a fake API: request shape, temperature handling, error mapping, key never logged); evidence-based principle confidence, falsifiable principles, citation logging, calibration tool
-- [ ] Not yet tested: any method against the real DeepSeek / Claude API and real training (only dry runs so far); `param_table()` on the real MMPretrain environment
+- [x] Real DeepSeek API with mock scores (AutoDL, 2026-10-13): agent_reflect (15 calls, all valid first time, 0 fallbacks, ~$0.08 with thinking on), agent, GENIUS, EvoPrompting, LLMatic, LAPT run end to end
+- [x] Controls for innovation 2 (D-8 fixed / D-9 random / D-10 no-update principles, random-initialised transfer), NADER original-threshold run, proxy-reliability and equivalence tools; equivalence checked on the real MMPretrain build
+- [ ] Not yet tested: real training in a search; Claude provider against the real API
 - [ ] Detection (MMDetection) and segmentation (MMSegmentation) runners
 - [ ] Visualisation scripts (evolution curves, Grad-CAM heatmaps)
