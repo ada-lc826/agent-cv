@@ -46,6 +46,7 @@ class GeniusController(BaseController):
         best = memory.best_trial() or memory.baseline
         arch, why, _ = ask_architecture(
             self.client, "genius", GENIUS_SYSTEM, self._conversation(memory), self.task, tried, temperature=0.0,
+            record=self.proposal_attempts,
             mock_fn=lambda att: mock_neighbour(best.architecture, self.task, tried, self.rng(round_, f"mock{att}")))
         if arch is None:
             return Proposal(self.random_untried(memory, round_), note="genius-fallback: random untried")

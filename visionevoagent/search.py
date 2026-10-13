@@ -93,6 +93,7 @@ class SearchEngine:
 
         stop = "max_rounds"
         for r in range(mem.last_round() + 1, cfg.max_rounds + 1):
+            self.controller.proposal_attempts = []
             try:
                 prop = self.controller.propose(mem, r)
             except AgentClientFatal:
@@ -106,7 +107,8 @@ class SearchEngine:
             if bad or architecture_signature(arch) in mem.tried_signatures():
                 raise RuntimeError(f"controller {self.controller.name} returned an illegal candidate: "
                                    f"{bad or 'already tried'}")  # a controller bug, not a trial failure
-            trial = self._evaluate(r, arch, prop.note, prop.search_mode, prop.cited_principles)
+            trial = self._evaluate(r, arch, prop.note, prop.search_mode, prop.cited_principles,
+                                   attempts=self.controller.proposal_attempts)
             log.info("round %d [%s] %s -> %s%s", r, prop.search_mode or "-", trial.signature,
                      trial.score if trial.status == "ok" else f"FAILED({trial.failure_reason})",
                      "  * new best" if trial.is_best else "")
@@ -145,7 +147,8 @@ class SearchEngine:
         b = self.memory.best_trial()
         return b.score if b else self.memory.baseline.score
 
-    def _evaluate(self, r: int, arch, note: str, mode: str, cited: Optional[list] = None) -> Trial:
+    def _evaluate(self, r: int, arch, note: str, mode: str, cited: Optional[list] = None,
+                  attempts: Optional[list] = None) -> Trial:
         mem, cfg = self.memory, self.cfg
         sig = architecture_signature(arch)
         best_before = self._current_best_score()
@@ -153,7 +156,7 @@ class SearchEngine:
         t = Trial(round=r, architecture=arch, signature=sig, status=res.status, score=res.score,
                   params=res.params, failure_reason=res.failure_reason, search_mode=mode,
                   proposer_note=note, duration_s=res.duration_s, task=cfg.task,
-                  cited_principles=list(cited or []))
+                  cited_principles=list(cited or []), proposal_attempts=list(attempts or []))
         base = mem.baseline
         if res.status == "ok":
             t.delta_vs_baseline = round(res.score - base.score, 3)

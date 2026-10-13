@@ -126,7 +126,7 @@ class NaderController(BaseController):
             self.client, "nader_modify", NADER_SYSTEM,
             NADER_MODIFY.format(space=fmt_space(self.task), inspiration=insp[i],
                                 arch=fmt_arch(parent.architecture), experience=experience),
-            self.task, tried,
+            self.task, tried, record=self.proposal_attempts,
             mock_fn=lambda att: mock_neighbour(parent.architecture, self.task, tried, self.rng(round_, f"m{att}")))
         self.state.setdefault("edges", {})[str(round_)] = {"parent": parent.round, "inspiration": i}
         if arch is None:

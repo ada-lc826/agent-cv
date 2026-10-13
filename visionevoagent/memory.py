@@ -37,6 +37,9 @@ class Trial:
     # Principles the Design Agent said it relied on, with their confidence/status at proposal time:
     # [{"id", "confidence", "status"}]. Used for the calibration analysis (tools/principle_calibration.py).
     cited_principles: List[Dict[str, Any]] = field(default_factory=list)
+    # Outcome of every LLM answer behind this proposal, in order: ok | duplicate | invalid | call_error.
+    # Empty for methods that do not ask an LLM for the architecture. Used for the duplicate rate.
+    proposal_attempts: List[str] = field(default_factory=list)
 
 
 @dataclass

@@ -151,7 +151,7 @@ class AgentSearchController(BaseController):
             reflection_context=self._reflection_context(memory), round=round_,
             candidate_costs=self._candidate_costs(memory, best["architecture"], budget,
                                                   memory.tried_signatures() | failed))
-        arch, note, cited_ids = self.design.propose(ctx)
+        arch, note, cited_ids = self.design.propose(ctx, record=self.proposal_attempts)
         cited = []
         for pid in cited_ids:  # snapshot the confidence the Design Agent saw (calibration analysis)
             p = memory.principle(pid)

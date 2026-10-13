@@ -42,6 +42,23 @@ def _llm_usage(run_dir: str) -> Dict[str, Any]:
     return out
 
 
+def _proposal_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
+    """Duplicate rate and fallback share (decision 2026-10-13): every method gets one ask plus at most two
+    re-asks; an answer naming an already-evaluated architecture counts as a duplicate, and a round whose
+    attempts were all rejected falls back to a random untried architecture."""
+    answers = [o for t in mem.trials for o in t.proposal_attempts if o != "call_error"]
+    n = len(mem.trials)
+    fallback = sum(1 for t in mem.trials if "fallback" in t.proposer_note.split(":")[0])
+    dup = answers.count("duplicate")
+    return {
+        "n_llm_answers": len(answers),
+        "n_duplicate_answers": dup,
+        "duplicate_rate": round(dup / len(answers), 3) if answers else None,
+        "n_rounds_reasked": sum(1 for t in mem.trials if len(t.proposal_attempts) > 1),
+        "fallback_rate": round(fallback / n, 3) if n else None,
+    }
+
+
 def evolution_curve(mem: ArchitectureMemory) -> List[Dict[str, Any]]:
     best = mem.baseline.score if mem.baseline else None
     sig = mem.baseline.signature if mem.baseline else None
@@ -81,6 +98,7 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
         "failure_reasons": dict(Counter(t.failure_reason or "unknown" for t in mem.trials if t.status != "ok")),
         # trials proposed by a fallback (LLM answer unusable) rather than by the method itself
         "n_fallback_proposals": sum(1 for t in mem.trials if "fallback" in t.proposer_note.split(":")[0]),
+        **_proposal_stats(mem),
         "baseline": asdict(mem.baseline) if mem.baseline else None,
         "best": asdict(best) if best else None,
         "best_improvement": round(best.score - mem.baseline.score, 3) if best and mem.baseline

@@ -96,6 +96,8 @@ def main() -> None:
             "multiple_of_random": (prefix + _ms(ratios, 2)) if ratios else "-",
             "invalid_trial_rate": _ms([r.get("invalid_trial_rate") for r in rs], 3),
             "fallback_proposals": _ms([r.get("n_fallback_proposals", 0) for r in rs], 1),
+            "fallback_rate": _ms([r.get("fallback_rate") for r in rs], 3),
+            "duplicate_rate": _ms([r.get("duplicate_rate") for r in rs], 3),
             "gpu_hours": _ms([r.get("gpu_hours") for r in rs], 2),
             "llm_calls": _ms([r["llm"]["calls"] for r in rs], 1),
             "llm_tokens_k": _ms([(r["llm"]["input_tokens"] + r["llm"]["output_tokens"]) / 1000 for r in rs], 1),

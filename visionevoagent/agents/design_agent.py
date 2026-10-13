@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..prompts import DESIGN_REFLECTION_ADDENDUM, DESIGN_SYSTEM, build_design_prompt
-from ..schemas import design_schema, validate_design
+from ..schemas import MAX_PROPOSAL_ATTEMPTS, attempt_outcome, design_schema, validate_design
 from ..search_space import (DIMENSIONS, Architecture, architecture_signature, canonicalize,
                             count_architecture_difference, get_search_space, random_local_mutation)
 
@@ -33,14 +33,17 @@ class DesignContext:
 
 
 class DesignAgent:
-    def __init__(self, client: AgentClient, seed: int = 0, max_attempts: int = 2):
+    def __init__(self, client: AgentClient, seed: int = 0, max_attempts: int = MAX_PROPOSAL_ATTEMPTS):
         self.client = client
         self.seed = seed
         self.max_attempts = max_attempts
 
-    def propose(self, ctx: DesignContext) -> Tuple[Architecture, str, List[str]]:
-        """Return (architecture, note, cited principle ids). Never raises: falls back to a legal local
-        mutation (which cites nothing)."""
+    def propose(self, ctx: DesignContext, record: Optional[List[str]] = None
+                ) -> Tuple[Architecture, str, List[str]]:
+        """Return (architecture, note, cited principle ids). Never raises: after max_attempts rejected
+        answers it falls back to a random untried legal local mutation (which cites nothing). The outcome
+        of every attempt is appended to `record` (ok | duplicate | invalid | call_error)."""
+        record = record if record is not None else []
         space = get_search_space(ctx.task)
         system = DESIGN_SYSTEM + (DESIGN_REFLECTION_ADDENDUM if ctx.reflection_context is not None else "")
         known_ids = {p.get("id") for p in (ctx.reflection_context or {}).get("design_principles", [])
@@ -61,15 +64,17 @@ class DesignAgent:
                 raise
             except AgentClientError as e:
                 log.warning("design agent call failed (attempt %d): %s", attempt, e)
+                record.append("call_error")
                 feedback = ""
                 continue
             reason = validate_design(out, ctx.task)
             if reason is None:
                 arch = canonicalize(out["architecture"])
                 reason = self._check_rules(arch, ctx)
-                if reason is None:
-                    cited = [c for c in dict.fromkeys(out.get("cited_principles", [])) if c in known_ids]
-                    return arch, f"llm: {out['rationale']}", cited
+            record.append(attempt_outcome(reason))
+            if reason is None:
+                cited = [c for c in dict.fromkeys(out.get("cited_principles", [])) if c in known_ids]
+                return arch, f"llm: {out['rationale']}", cited
             log.info("design rejected (attempt %d): %s", attempt, reason)
             feedback = reason
         arch, note = self._fallback(ctx)

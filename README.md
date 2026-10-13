@@ -102,6 +102,10 @@ export PYTHONPATH=$PWD
    ```bash
    python tools/compare_runs.py --runs runs --task classification --out runs/comparison
    ```
+6. Methods for segmentation, by the rule fixed on 2026-10-13 (top 2 of the five LLM comparison methods by mean best score over seeds 0/1/2 in the 30-trial classification comparison; refuses to select until all 15 runs are finished; Random, Reg-Evo and ours always run):
+   ```bash
+   python tools/select_seg_methods.py --runs runs --out runs/seg_method_selection.json
+   ```
 
 ### Outputs (`runs/<task>_<mode>[_<variant>]_s<seed>/`)
 
@@ -119,7 +123,7 @@ export PYTHONPATH=$PWD
 
 ## Comparison methods
 
-All are re-implemented under our search space (the official code of every LLM method is tied to its own search space), share the runner, budget and seeds, and return the same JSON as the Design Agent. An unusable LLM answer is retried once with feedback, then replaced by a random untried architecture; such trials are counted in `n_fallback_proposals`. Settings live under `baselines:` in the yaml. Deviations to report in the paper:
+All are re-implemented under our search space (the official code of every LLM method is tied to its own search space), share the runner, budget and seeds, and return the same JSON as the Design Agent. **Re-ask rule, identical for every LLM method including ours:** an unusable answer (illegal value, or an architecture that was already evaluated) is re-asked with the reason as feedback, at most twice (three answers in total); after that the round takes a random untried architecture (for our Design Agent: a random untried legal local mutation). Every answer's outcome is stored with the trial (`proposal_attempts`), and `search_summary.json` reports `duplicate_rate` (answers naming an evaluated architecture / all answers) and `fallback_rate` (rounds decided by the fallback / all rounds). EvoPrompting, LLMatic and NADER do not list every evaluated architecture in their original prompts, so they repeat themselves more often; this is reported, not corrected. Settings live under `baselines:` in the yaml. Deviations to report in the paper:
 
 | Method | Original | Here | Deviation |
 |---|---|---|---|
@@ -142,12 +146,12 @@ All of these are adaptations to our search space, not faithful reproductions; th
 - **Cost awareness.** The Design Agent sees the parameter change of every candidate move (computed once by building all 86 models on CPU, cached in `param_table.json`). Results should always be reported as accuracy *and* Δparams.
 - **Failure protection.**
   - OOM, NaN, timeouts, crashes and score drops below −noise go into the failure memory, and those configurations are never proposed again.
-  - A malformed or illegal LLM output is retried with feedback. If the retry also fails, the agent falls back to a legal local mutation.
+  - A malformed, illegal or repeated LLM output is re-asked with feedback, at most twice. If all three answers fail, the agent falls back to a random untried legal local mutation.
   - A failed reflection does not stop the search.
   - A wrong API key or invalid request (`AgentClientFatal`) stops the search immediately, so GPU time is not spent on the fallback.
   - Five consecutive failures stop the search.
 - **LLM.** DeepSeek V4.1 Flash (`deepseek-flash`, OpenAI-compatible API, key in `DEEPSEEK_API_KEY`), **thinking off for the main comparison** (yaml `thinking: false`), so the baselines' temperatures (GENIUS 0, EvoPrompting mixed, LLMatic levels) take effect as in the papers; `--thinking on` is a separate control (run directories tagged `think`). DeepSeek's JSON mode guarantees valid JSON but not the schema, so the schema is written into the system prompt and every answer is validated (invalid → one retry with feedback → legal fallback, counted in `n_fallback_proposals`). Responses are requested as gzip/deflate only (old `brotlipy` in conda base breaks the HTTP client's brotli decoder). All methods in one comparison must use the same model version and LLM setting. `--provider anthropic` switches to `claude-opus-5-5` (schema enforced server-side, refusal fallback on, no temperature). Every call is logged with tokens (incl. reasoning tokens), latency and the model that answered.
-- **Principle confidence.** Update rule after HypoExplore (Koo et al. 2026): supports c ← c + 0.2·s·(1−c), contradicts c ← c − 0.2·s·c, new principles start at 0.5, confirmed > 0.75, refuted < 0.25. Only trials since the previous reflection count as new evidence, and each principle gets at most one update per reflection, so no trial is counted twice.
+- **Principle confidence.** Update rule after HypoExplore (Koo et al. 2026): supports c ← c + 0.2·s·(1−c), contradicts c ← c − 0.2·s·c, new principles start at 0.5, confirmed > 0.75, refuted < 0.25. η stays at 0.2 (decision 2026-10-13); if confidences still barely move after the 30-trial runs, η gets a sensitivity experiment, but it is not tuned to spread the confidences. Only trials since the previous reflection count as new evidence, and each principle gets at most one update per reflection, so no trial is counted twice.
 
 ## Status
 
@@ -159,6 +163,7 @@ All of these are adaptations to our search space, not faithful reproductions; th
 - [x] DeepSeek V4.1 Flash provider (tested offline against a fake API: request shape, temperature handling, error mapping, key never logged); evidence-based principle confidence, falsifiable principles, citation logging, calibration tool
 - [x] Real DeepSeek API with mock scores (AutoDL, 2026-10-13): agent_reflect (15 calls, all valid first time, 0 fallbacks, ~$0.08 with thinking on), agent, GENIUS, EvoPrompting, LLMatic, LAPT run end to end
 - [x] Controls for innovation 2 (D-8 fixed / D-9 random / D-10 no-update principles, random-initialised transfer), NADER original-threshold run, proxy-reliability and equivalence tools; equivalence checked on the real MMPretrain build
+- [x] Uniform re-ask rule with duplicate / fallback statistics (`tests/test_reask.py`); segmentation method selection tool
 - [ ] Not yet tested: real training in a search; Claude provider against the real API
 - [ ] Detection (MMDetection) and segmentation (MMSegmentation) runners
 - [ ] Visualisation scripts (evolution curves, Grad-CAM heatmaps)

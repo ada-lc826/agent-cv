@@ -6,6 +6,19 @@ from typing import Any, Dict, List, Optional
 
 from .search_space import DIMENSIONS, get_search_space
 
+# Same for every LLM method, ours included (decision 2026-10-13): one ask plus at most 2 re-asks with
+# the rejection reason as feedback; after that the round falls back to a random untried architecture.
+MAX_PROPOSAL_ATTEMPTS = 3
+
+
+def attempt_outcome(reason: Optional[str]) -> str:
+    """Category of one proposed architecture, for the duplicate-rate statistics: ok | duplicate | invalid."""
+    if reason is None:
+        return "ok"
+    if "already evaluated" in reason or "known failed configuration" in reason:
+        return "duplicate"
+    return "invalid"
+
 EVIDENCE_TYPES = ["supports", "contradicts", "neutral"]
 PRINCIPLE_FIELDS = ["if", "scope", "then", "because", "disproved_if"]
 MAX_NEW_PRINCIPLES = 3

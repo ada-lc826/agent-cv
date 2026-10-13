@@ -90,6 +90,7 @@ class LLMaticController(BaseController):
                                               b=fmt_arch(parents[1].architecture))
         arch, why, _ = ask_architecture(
             self.client, f"llmatic_{op}", LLMATIC_SYSTEM, prompt, self.task, tried, **self._call_kwargs(level),
+            record=self.proposal_attempts,
             mock_fn=lambda att: mock_neighbour(parents[0].architecture, self.task, tried,
                                                self.rng(round_, f"mock{att}")))
         self.state.setdefault("pending", {})[str(round_)] = {"op": op, "instruction": instr, "level": level,
