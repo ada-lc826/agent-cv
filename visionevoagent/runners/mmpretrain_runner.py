@@ -29,6 +29,7 @@ class MMPretrainRunnerConfig:
     base_config: str = "configs/resnet/resnet50_8xb16_cifar100.py"
     work_root: str = "work_dirs/search"
     python: str = sys.executable
+    schedule: str = "proxy"                                # proxy | official (full recipe, for the proxy check)
     epochs: int = 30                                       # proxy schedule length
     warmup_epochs: int = 1
     batch_size: int = 128                                  # 8 GPUs x 16 in the official recipe
@@ -69,20 +70,31 @@ class MMPretrainRunner(BaseRunner):
         else:
             lines.append(f"model = dict(backbone=dict(type='EvoResNet_CIFAR', evo={evo!r}))")
         w, e = c.warmup_epochs, c.epochs
-        lines += [
-            f"train_cfg = dict(by_epoch=True, max_epochs={e}, val_interval={e})",
-            f"optim_wrapper = dict({'type=' + repr('AmpOptimWrapper') + ', ' if c.amp else ''}"
-            f"optimizer=dict(lr={c.lr}))",
-            "param_scheduler = ["
-            + (f"dict(type='LinearLR', start_factor=0.01, by_epoch=True, begin=0, end={w}, "
-               "convert_to_iter_based=True), " if w > 0 else "")
-            + f"dict(type='CosineAnnealingLR', T_max={e - w}, eta_min=0.0, by_epoch=True, begin={w}, end={e}, "
-            "convert_to_iter_based=True)]",
-            f"randomness = dict(seed={c.seed}, deterministic=False)",
-            f"default_hooks = dict(checkpoint=dict(interval={e}, max_keep_ckpts=1, save_last=True), "
-            "logger=dict(interval=50))",
-            "auto_scale_lr = dict(enable=False)",
-        ]
+        if c.schedule == "official":
+            # The reproduction's full recipe: the base config's own epochs / LR schedule / optimizer
+            # (CIFAR-100 ResNet-50: SGD lr 0.1, 200 epochs, multi-step), total batch kept on one GPU.
+            lines += [
+                f"randomness = dict(seed={c.seed}, deterministic=False)",
+                "default_hooks = dict(checkpoint=dict(max_keep_ckpts=1, save_last=True), logger=dict(interval=50))",
+                "auto_scale_lr = dict(enable=False)",
+            ]
+            if c.amp:
+                lines.append("optim_wrapper = dict(type='AmpOptimWrapper')")
+        else:
+            lines += [
+                f"train_cfg = dict(by_epoch=True, max_epochs={e}, val_interval={e})",
+                f"optim_wrapper = dict({'type=' + repr('AmpOptimWrapper') + ', ' if c.amp else ''}"
+                f"optimizer=dict(lr={c.lr}))",
+                "param_scheduler = ["
+                + (f"dict(type='LinearLR', start_factor=0.01, by_epoch=True, begin=0, end={w}, "
+                   "convert_to_iter_based=True), " if w > 0 else "")
+                + f"dict(type='CosineAnnealingLR', T_max={e - w}, eta_min=0.0, by_epoch=True, begin={w}, end={e}, "
+                "convert_to_iter_based=True)]",
+                f"randomness = dict(seed={c.seed}, deterministic=False)",
+                f"default_hooks = dict(checkpoint=dict(interval={e}, max_keep_ckpts=1, save_last=True), "
+                "logger=dict(interval=50))",
+                "auto_scale_lr = dict(enable=False)",
+            ]
         for split, n, bs in (("train", c.train_subset, c.batch_size), ("val", c.val_subset, c.batch_size)):
             ds = []
             if c.data_root:

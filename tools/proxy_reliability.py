@@ -93,6 +93,10 @@ def cmd_sample(a) -> None:
 
 def cmd_analyze(a) -> None:
     rows: List[Dict[str, str]] = list(csv.DictReader(open(a.csv, encoding="utf-8")))
+    skipped = [r["signature"] for r in rows if not r.get("proxy") or not r.get("full")]
+    rows = [r for r in rows if r.get("proxy") and r.get("full")]
+    if skipped:
+        print(f"skipped (missing proxy or full score): {', '.join(skipped)}")
     sig = [r["signature"] for r in rows]
     px, fx = [float(r["proxy"]) for r in rows], [float(r["full"]) for r in rows]
     n, k = len(rows), min(a.top_k, len(rows))
