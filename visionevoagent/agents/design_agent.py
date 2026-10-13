@@ -29,6 +29,7 @@ class DesignContext:
     noise_level: float
     reflection_context: Optional[Dict[str, Any]]  # None when reflection is disabled
     round: int
+    candidate_costs: Optional[List[Dict[str, Any]]] = None  # [{"architecture", "params"}]; None = no cost table
 
 
 class DesignAgent:
@@ -47,7 +48,8 @@ class DesignAgent:
                 task=ctx.task, metric=ctx.metric, space=space, baseline=ctx.baseline,
                 history=ctx.history, best=ctx.best, failed=sorted(ctx.failed),
                 search_mode=ctx.search_mode, mutation_budget=ctx.mutation_budget,
-                noise_level=ctx.noise_level, reflection_context=ctx.reflection_context, feedback=feedback)
+                noise_level=ctx.noise_level, reflection_context=ctx.reflection_context,
+                candidate_costs=ctx.candidate_costs, feedback=feedback)
             try:
                 out = self.client.complete_json("design", system, user, design_schema(ctx.task),
                                                 mock_fn=lambda: self._mock(ctx, attempt))

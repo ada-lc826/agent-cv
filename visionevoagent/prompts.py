@@ -66,10 +66,23 @@ def _fmt_history(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(out)
 
 
+def _fmt_costs(costs: List[Dict[str, Any]], baseline_params: float, limit: int = 40) -> str:
+    rows = sorted(costs, key=lambda c: c["params"])[:limit]
+    out = []
+    for c in rows:
+        a = c["architecture"]
+        out.append(f"- {a['attention']} | {a['conv']} | {a['fusion']} | {a['target_stage']}: "
+                   f"{c['params'] - baseline_params:+.2f}M (x{c['params'] / baseline_params:.3f})")
+    if len(costs) > limit:
+        out.append(f"(... {len(costs) - limit} more, all larger)")
+    return "\n".join(out)
+
+
 def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], baseline: Dict[str, Any],
                         history: List[Dict[str, Any]], best: Dict[str, Any], failed: List[str],
                         search_mode: str, mutation_budget: int, noise_level: float,
                         reflection_context: Optional[Dict[str, Any]],
+                        candidate_costs: Optional[List[Dict[str, Any]]] = None,
                         feedback: str = "") -> str:
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
@@ -82,6 +95,11 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
         f"MUTATION_BUDGET: {mutation_budget}",
         f"NOISE_LEVEL: {noise_level:.2f} {metric} points",
     ]
+    if candidate_costs:
+        parts.append("CANDIDATE COSTS (every untried architecture within MUTATION_BUDGET of the current best, "
+                     "as attention | conv | fusion | target_stage: params vs baseline). Weigh the expected gain "
+                     "against this cost; a gain within NOISE_LEVEL does not justify extra parameters.\n"
+                     + _fmt_costs(candidate_costs, baseline["params"]))
     if reflection_context is not None:
         parts.append(f"REFLECTION_CONTEXT:\n{json.dumps(reflection_context, indent=2, ensure_ascii=False)}")
     if feedback:

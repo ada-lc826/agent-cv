@@ -1,7 +1,7 @@
 # CIFAR-100 ResNet-50 (MMPretrain official recipe), proxy search on 1 GPU.
 # Usage: python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
 search:
-  max_rounds: 20             # same trial budget for every method
+  max_rounds: 10             # same trial budget for every method (research plan; 30 for the sensitivity run)
   min_improvement: 0.2       # >= proxy seed std; measure it first (see README) and update
   noise_level: 0.2
   early_stop_patience: 0     # keep 0 in method comparisons
@@ -20,6 +20,16 @@ agent:
     stagnation_budget: 2
     stagnation_rounds: 3
     explore_every: 4
+
+# Comparison methods, scaled to the 10-trial budget (see README "Comparison methods").
+baselines:
+  reg_evo: {population_size: 4, tournament_size: 2}
+  tpe: {n_startup_trials: 3}
+  genius: {}
+  evoprompting: {children_per_gen: 5, top_p: 4, k: 2}
+  llmatic: {p_mutation: 0.7, random_init: 2}
+  lapt: {n_init: 3, k: 2, adapt_every: 2, top_r: 2}
+  nader: {n_inspirations: 10, extract_every: 2, top_k: 5}
 
 runner:
   mmpretrain_root: /root/mmpretrain          # checkout with tools/train.py and data/cifar100

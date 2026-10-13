@@ -12,7 +12,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 log = logging.getLogger(__name__)
 
@@ -48,15 +48,23 @@ class AgentClient:
         elif cfg.provider != "mock":
             raise ValueError(f"unknown provider {cfg.provider!r}")
 
-    def complete_json(self, purpose: str, system: str, user: str, schema: Dict[str, Any],
-                      mock_fn: Callable[[], Dict[str, Any]]) -> Dict[str, Any]:
+    def complete_json(self, purpose: str, system: str, user: Union[str, List[Dict[str, str]]],
+                      schema: Dict[str, Any], mock_fn: Callable[[], Dict[str, Any]],
+                      effort: Optional[str] = None) -> Dict[str, Any]:
+        """`user` is either one user message or a whole conversation (alternating user/assistant
+        text turns, ending with a user turn). `effort` overrides the configured effort for this call.
+
+        Sampling temperature is deliberately not exposed: Claude Opus 5.5 rejects it (400). Baselines
+        whose original papers vary temperature document their substitute where they call this."""
         t0 = time.time()
-        record: Dict[str, Any] = {"purpose": purpose, "provider": self.cfg.provider, "model": self.cfg.model}
+        record: Dict[str, Any] = {"purpose": purpose, "provider": self.cfg.provider, "model": self.cfg.model,
+                                  "effort": effort or self.cfg.effort}
+        messages = [{"role": "user", "content": user}] if isinstance(user, str) else list(user)
         try:
             if self.cfg.provider == "mock":
                 out = mock_fn()
             else:
-                out = self._anthropic_json(system, user, schema, record)
+                out = self._anthropic_json(system, messages, schema, record, effort or self.cfg.effort)
             record["ok"] = True
             return out
         except AgentClientError as e:
@@ -67,15 +75,15 @@ class AgentClient:
             self._log(record)
 
     # ------------------------------------------------------------------
-    def _anthropic_json(self, system: str, user: str, schema: Dict[str, Any],
-                        record: Dict[str, Any]) -> Dict[str, Any]:
+    def _anthropic_json(self, system: str, messages: List[Dict[str, str]], schema: Dict[str, Any],
+                        record: Dict[str, Any], effort: str) -> Dict[str, Any]:
         anthropic = self._anthropic
         kwargs: Dict[str, Any] = dict(
             model=self.cfg.model,
             max_tokens=self.cfg.max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user}],
-            output_config={"effort": self.cfg.effort,
+            messages=messages,
+            output_config={"effort": effort,
                            "format": {"type": "json_schema", "schema": schema}},
         )
         try:
