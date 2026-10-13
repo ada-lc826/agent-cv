@@ -67,8 +67,10 @@ class AgentClient:
             if not key:
                 raise AgentClientFatal("DEEPSEEK_API_KEY is not set")
             self._openai = openai
+            # No brotli: conda's old brotlipy breaks the HTTP client's brotli decoder.
             self._client = openai.OpenAI(api_key=key, base_url=cfg.base_url or DEEPSEEK_BASE_URL,
-                                         max_retries=cfg.max_retries, timeout=cfg.timeout_s)
+                                         max_retries=cfg.max_retries, timeout=cfg.timeout_s,
+                                         default_headers={"Accept-Encoding": "gzip, deflate"})
         elif cfg.provider != "mock":
             raise ValueError(f"unknown provider {cfg.provider!r}")
 
