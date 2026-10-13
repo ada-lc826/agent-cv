@@ -138,8 +138,9 @@ class ArchitectureMemory:
         mem.baseline = Trial(**b) if b else None
         return mem
 
-    def load_principles_from(self, path: str, task: str = "") -> int:
-        """Cold-start from another run's principle memory (principle-transfer experiments).
+    def load_principles_from(self, path: str, task: str = "", mark_transferred: bool = True) -> int:
+        """Cold-start from another run's principle memory (principle-transfer experiments), or from a
+        hand-written file (fixed-principle control, mark_transferred=False).
 
         Refuted principles are not transferred. The others keep their confidence and evidence log, get a
         fresh id in this run and `transferred_from`; new evidence in this task keeps updating them."""
@@ -147,15 +148,24 @@ class ArchitectureMemory:
             items = json.load(f)
         n = 0
         for x in items:
+            if "principle" not in x and "fields" in x:  # hand-written: fields only
+                x = {**x, "principle": render_principle(x["fields"])}
             p = Principle(**x)
             if p.status == "refuted":
                 continue
-            p.transferred_from = p.transferred_from or p.task or os.path.basename(os.path.dirname(path))
+            if mark_transferred:
+                p.transferred_from = p.transferred_from or p.task or os.path.basename(os.path.dirname(path))
             p.task = task or p.task
             p.id = self._next_principle_id()
             self.principles.append(p)
             n += 1
         return n
+
+    def add_principles(self, items: List[Principle]) -> int:
+        for p in items:
+            p.id = self._next_principle_id()
+            self.principles.append(p)
+        return len(items)
 
     def _next_principle_id(self) -> str:
         nums = [int(p.id[1:]) for p in self.principles if re.fullmatch(r"p\d+", p.id or "")]

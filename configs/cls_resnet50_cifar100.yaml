@@ -1,7 +1,7 @@
 # CIFAR-100 ResNet-50 (MMPretrain official recipe), proxy search on 1 GPU.
 # Usage: python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
 search:
-  max_rounds: 10             # same trial budget for every method (research plan; 30 for the sensitivity run)
+  max_rounds: 10             # pilot budget; the formal classification comparison adds --max_rounds 30
   min_improvement: 0.2       # >= proxy seed std; measure it first (see README) and update
   noise_level: 0.2
   early_stop_patience: 0     # keep 0 in method comparisons
@@ -12,7 +12,8 @@ agent:
     provider: deepseek       # needs DEEPSEEK_API_KEY (never commit it); alternative: anthropic + ANTHROPIC_API_KEY
     model: deepseek-flash    # DeepSeek V4.1 Flash (for anthropic: claude-opus-5-5)
     effort: medium           # DeepSeek reasoning_effort: low->low, medium/high->high, xhigh/max->max
-    thinking: true           # DeepSeek thinking mode (its default); false makes baseline temperatures apply
+    thinking: false          # main comparison without thinking so baseline temperatures apply (advisor);
+                             # the thinking control is a separate run: --thinking on
     use_fallbacks: true      # anthropic only: server-side refusal fallback
   search:
     reflect_every_n: 2

@@ -21,17 +21,24 @@ CSV_FIELDS = ["round", "signature"] + DIMENSIONS + [
 
 def _llm_usage(run_dir: str) -> Dict[str, Any]:
     path = os.path.join(run_dir, "llm_calls.jsonl")
-    out = {"calls": 0, "failed_calls": 0, "input_tokens": 0, "output_tokens": 0, "latency_s": 0.0}
+    """Cost of the method's LLM use, reported next to GPU hours (equal trial counts alone are not fairness)."""
+    out = {"calls": 0, "failed_calls": 0, "input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0,
+           "cache_hit_tokens": 0, "latency_s": 0.0, "calls_by_purpose": {}, "models_served": []}
     if not os.path.exists(path):
         return out
+    purposes, models = Counter(), set()
     with open(path, encoding="utf-8") as f:
         for line in f:
             rec = json.loads(line)
             out["calls"] += 1
             out["failed_calls"] += 0 if rec.get("ok") else 1
-            out["input_tokens"] += rec.get("input_tokens") or 0
-            out["output_tokens"] += rec.get("output_tokens") or 0
+            for k in ("input_tokens", "output_tokens", "reasoning_tokens", "cache_hit_tokens"):
+                out[k] += rec.get(k) or 0
             out["latency_s"] = round(out["latency_s"] + (rec.get("latency_s") or 0.0), 2)
+            purposes[rec.get("purpose", "?")] += 1
+            models.add(str(rec.get("served_model") or rec.get("model") or "?"))
+    out["calls_by_purpose"] = dict(purposes)
+    out["models_served"] = sorted(models)
     return out
 
 

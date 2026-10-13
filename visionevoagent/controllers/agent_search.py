@@ -11,6 +11,11 @@ Sub-switches support the ablations of the research plan:
   D-7 reflection_style="immediate"  RZ-NAS-style: reflect on the last trial only, every round,
                                     nothing accumulated across rounds
   show_param_costs=False            Design Agent without the per-candidate parameter-cost table
+Controls for "do the principles matter, and does online updating matter" (advisor, 2026-10-13):
+  principle_mode="fixed"      a fixed principle set loaded at the start (generic prior knowledge),
+                              never updated, no new principles
+  principle_mode="random"     randomly generated principles in the same format, never updated
+  principle_mode="no_update"  principles are induced as usual but their confidence never moves
 """
 from __future__ import annotations
 
@@ -26,6 +31,7 @@ from .base import BaseController, Proposal
 log = logging.getLogger(__name__)
 
 REFLECTION_STYLES = ("full", "rule", "immediate")
+PRINCIPLE_MODES = ("online", "fixed", "random", "no_update")
 
 
 @dataclass
@@ -41,6 +47,7 @@ class AgentSearchConfig:
     explore_every: int = 4              # every k-th round is an exploration round (0 = never)
     max_principles_in_prompt: int = 8
     show_param_costs: bool = True       # per-candidate parameter-cost table in the design prompt
+    principle_mode: str = "online"      # online | fixed | random | no_update (see module docstring)
 
 
 def trial_rows(memory: ArchitectureMemory) -> List[Dict[str, Any]]:
@@ -66,6 +73,8 @@ class AgentSearchController(BaseController):
         super().__init__(task, seed)
         if cfg.reflection_style not in REFLECTION_STYLES:
             raise ValueError(f"reflection_style must be one of {REFLECTION_STYLES}")
+        if cfg.principle_mode not in PRINCIPLE_MODES:
+            raise ValueError(f"principle_mode must be one of {PRINCIPLE_MODES}")
         self.design = design
         self.reflector = reflector
         self.cfg = cfg
@@ -122,7 +131,12 @@ class AgentSearchController(BaseController):
         return ctx
 
     def _uses_principle_memory(self) -> bool:
+        """Principles from memory are shown to the Design Agent (all principle modes)."""
         return self.cfg.reflection_style == "full" and self.cfg.use_principle_memory
+
+    def _learns_principles(self) -> bool:
+        """The Reflector's principle output is written back to memory (online and no_update only)."""
+        return self._uses_principle_memory() and self.cfg.principle_mode in ("online", "no_update")
 
     def propose(self, memory: ArchitectureMemory, round_: int) -> Proposal:
         mode = self._search_mode(round_)
@@ -163,7 +177,7 @@ class AgentSearchController(BaseController):
         last_ref = memory.latest_reflection()
         since = last_ref["round"] if last_ref else 0
         new_trials = history[-1:] if immediate else [r for r in history if r["round"] > since]
-        keep = self._uses_principle_memory()
+        keep = self._learns_principles()
         ctx = ReflectionContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best_info(memory), history=history[-1:] if immediate else history, new_trials=new_trials,
@@ -180,8 +194,13 @@ class AgentSearchController(BaseController):
         return ref
 
     def _apply_reflection(self, memory: ArchitectureMemory, ref: Dict[str, Any], round_: int) -> Dict[str, Any]:
-        """Evidence updates (one per principle per reflection, unknown ids ignored), then new principles."""
+        """Evidence updates (one per principle per reflection, unknown ids ignored), then new principles.
+        no_update: the updates are recorded in the reflection but not applied, so confidence stays 0.5."""
         updated, ignored = [], []
+        if self.cfg.principle_mode == "no_update":
+            added = [memory.add_principle(f, self.task, round_, already_updated={p.id for p in memory.principles}).id
+                     for f in ref["new_principles"]]
+            return {"updated": [], "ignored": [u["principle_id"] for u in ref["principle_updates"]], "added": added}
         for u in ref["principle_updates"]:
             pid = u["principle_id"]
             if pid in updated:

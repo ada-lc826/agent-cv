@@ -9,6 +9,10 @@ Comparison methods (same budget, runner and seeds):
 Ablations of VisionEvoAgent (each gets its own run directory automatically):
     --no_failure_memory  --no_principle_memory  --reflection_style rule|immediate  --no_param_costs
     --mutation_budget 4  --explore_every 0  --reflect_every_n 1|2|4
+    --principle_mode fixed|random|no_update        (do the principles / online updates matter?)
+    --init_principles <run>/principle_memory.json | random   (transfer vs random initialisation)
+NADER with its original 90%-of-parent reflection threshold instead of the noise level:
+    --mode nader --nader_threshold orig
 """
 from __future__ import annotations
 
@@ -20,6 +24,8 @@ import sys
 
 from visionevoagent.agent_client import AgentClient, AgentClientConfig
 from visionevoagent.agents import DesignAgent, ReflectorAgent
+from visionevoagent.controllers.agent_search import PRINCIPLE_MODES
+from visionevoagent.principle_controls import random_principles
 from visionevoagent.controllers import (REFLECTION_STYLES, AgentSearchConfig, AgentSearchController,
                                         EvoPromptingController, GeniusController, LAPTController,
                                         LLMaticController, NaderController, RandomSearchController,
@@ -57,7 +63,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
     p.add_argument("--no_fallbacks", action="store_true", help="disable server-side refusal fallbacks")
     p.add_argument("--init_principles", default="",
-                   help="principle_memory.json of another run (transfer; agent_reflect and lapt)")
+                   help="principle_memory.json of another run (transfer; agent_reflect and lapt), "
+                        "or 'random' for randomly initialised principles (agent_reflect)")
+    p.add_argument("--n_random_principles", type=int, default=8)
     # ---- VisionEvoAgent ablations
     p.add_argument("--no_failure_memory", action="store_true", help="ablation D-1")
     p.add_argument("--no_principle_memory", action="store_true", help="ablation D-2")
@@ -67,6 +75,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--reflection_style", choices=REFLECTION_STYLES,
                    help="ablations D-6 (rule) and D-7 (immediate); default full")
     p.add_argument("--no_param_costs", action="store_true", help="Design Agent without the cost table")
+    p.add_argument("--principle_mode", choices=PRINCIPLE_MODES,
+                   help="online (default) | fixed | random | no_update control experiments")
+    p.add_argument("--fixed_principles", default="configs/principles_fixed_cls.json",
+                   help="principle file for --principle_mode fixed")
+    p.add_argument("--nader_threshold", choices=("noise", "orig"),
+                   help="NADER reflection trigger: noise level (default) or the original 0.9 x parent rule")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args(argv)
 
@@ -88,12 +102,16 @@ def variant_tag(a: argparse.Namespace) -> str:
         parts.append(a.reflection_style)
     if a.no_param_costs:
         parts.append("nocost")
+    if a.principle_mode and a.principle_mode != "online":
+        parts.append(f"pm{a.principle_mode}")
     if a.init_principles:
-        parts.append("transfer")
+        parts.append("randinit" if a.init_principles == "random" else "transfer")
+    if a.nader_threshold == "orig":
+        parts.append("thr90")
     if a.max_rounds is not None:
         parts.append(f"t{a.max_rounds}")
-    if a.thinking == "off":
-        parts.append("nothink")
+    if a.thinking == "on":  # main experiments run with thinking off (configs); the thinking control is tagged
+        parts.append("think")
     return "-".join(parts)
 
 
@@ -134,12 +152,28 @@ def main(argv=None) -> int:
 
     memory = ArchitectureMemory.load(run_dir)
     transferred = []
-    if a.init_principles:
+    pmode = a.principle_mode or ya.get("search", {}).get("principle_mode", "online")
+    if a.init_principles and pmode in ("fixed", "random"):
+        raise SystemExit("--init_principles cannot be combined with --principle_mode fixed/random")
+    if a.init_principles == "random":
+        if a.mode != "agent_reflect":
+            raise SystemExit("--init_principles random is only defined for agent_reflect")
+        if not memory.principles:
+            n = memory.add_principles(random_principles(a.task, a.n_random_principles, a.seed))
+            logging.info("initialised %d random principles", n)
+    elif a.init_principles:
         with open(a.init_principles, encoding="utf-8") as f:
             transferred = [x["principle"] for x in json.load(f)]
         if a.mode == "agent_reflect" and not memory.principles:
             n = memory.load_principles_from(a.init_principles, a.task)
             logging.info("loaded %d transferred principles from %s", n, a.init_principles)
+    if a.mode == "agent_reflect" and not memory.principles:
+        if pmode == "fixed":
+            n = memory.load_principles_from(a.fixed_principles, a.task, mark_transferred=False)
+            logging.info("principle control 'fixed': %d principles from %s", n, a.fixed_principles)
+        elif pmode == "random":
+            n = memory.add_principles(random_principles(a.task, a.n_random_principles, a.seed))
+            logging.info("principle control 'random': %d principles", n)
 
     # ---- runner ----
     if a.dry_run:
@@ -170,6 +204,8 @@ def main(argv=None) -> int:
         elif m == "lapt":
             controller = LAPTController(a.task, a.seed, client, runner.metric, init_principles=transferred, **kw)
         else:
+            if a.nader_threshold == "orig":
+                kw = {**kw, "drop_threshold": None}
             controller = NaderController(a.task, a.seed, client, runner.metric, scfg.noise_level, **kw)
     else:
         client = build_client(a, ya, run_dir)
@@ -185,6 +221,7 @@ def main(argv=None) -> int:
             acfg.stagnation_budget = max(acfg.stagnation_budget, a.mutation_budget)
         if a.no_param_costs:
             acfg.show_param_costs = False
+        acfg.principle_mode = pmode
         reflector = ReflectorAgent(client) if acfg.use_reflection and acfg.reflection_style != "rule" else None
         controller = AgentSearchController(a.task, a.seed, DesignAgent(client, seed=a.seed), reflector, acfg,
                                            metric=runner.metric, noise_level=scfg.noise_level,
