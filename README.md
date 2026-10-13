@@ -6,9 +6,9 @@ VisionEvoAgent improves an established vision model, such as the official MMPret
 
 | Innovation | Component | Switch |
 |---|---|---|
-| 1. Agent-Guided Module Exploration | `DesignAgent`: reads the full history table, the current best and the failed configurations, then proposes the next candidate. Includes an explore/exploit schedule, a mutation budget that widens when the search stagnates, rule checks with retries and a legal fallback. | `--mode agent` |
-| 2. Reflective Architecture Evolution | `ReflectorAgent`: every N rounds it distils effective/ineffective patterns, synergies and design principles into `ArchitectureMemory` (trial/failure/principle memory). These feed the next design. Principles can be transferred across tasks. | `--mode agent_reflect` |
-| Baseline | `RandomSearchController`: sampling without replacement. | `--mode random` |
+| 1. Agent-Guided Module Exploration | `DesignAgent`: reads the full history table, the current best and the failed configurations, plus a **cost table** with the parameter change of every legal untried move from the current best, then proposes the next candidate. Includes an explore/exploit schedule, a mutation budget that widens when the search stagnates, rule checks with retries and a legal fallback. | `--mode agent` |
+| 2. Reflective Architecture Evolution | `ReflectorAgent`: every N rounds it reads the trials since its last reflection and reports, for each existing design principle, supporting / contradicting / neutral evidence with a strength; the principle's confidence moves up or down accordingly (confirmed > 0.75, refuted < 0.25, refuted ones are no longer shown to the Design Agent). New principles must be falsifiable (IF … IN … THEN … BECAUSE … DISPROVED IF …). The Design Agent cites the principles it relies on, which makes the confidences checkable (`tools/principle_calibration.py`). Principles can be transferred across tasks. | `--mode agent_reflect` |
+| Baselines | Random search plus the 7 comparison methods of the research plan, re-implemented under our search space (see "Comparison methods"). | `--mode random\|reg_evo\|tpe\|genius\|evoprompting\|llmatic\|lapt\|nader` |
 
 ## Search space (classification)
 
@@ -28,16 +28,19 @@ visionevoagent/
   search_space.py        search space, signatures, mutation, legality checks
   memory.py              ArchitectureMemory: trial / failure / principle / reflection, atomic JSON writes
   schemas.py             JSON schemas for the Design and Reflector outputs, plus validation
-  prompts.py             all prompts (can be quoted verbatim in the paper appendix)
+  prompts.py             VisionEvoAgent prompts (can be quoted verbatim in the paper appendix)
+  baseline_prompts.py    prompts of the re-implemented LLM comparison methods
   agent_client.py        Claude API (official SDK, structured JSON output) or mock; every call logged
   agents/                DesignAgent (innovation 1), ReflectorAgent (innovation 2)
-  controllers/           RandomSearch, AgentSearch (the other comparison methods go here)
+  controllers/           AgentSearch (ours) + random, reg_evo, tpe, genius, evoprompting, llmatic, lapt, nader
   runners/               MMPretrainRunner (real training), MockRunner (dry runs only)
   plugins/               module implementations + MMPretrain registration (EvoResNet_CIFAR, fusion neck)
   search.py              main loop: baseline → propose → train → record → reflect, with resume
   report.py              search_history.csv / search_summary.json / evolution.json
 run_search.py            command-line entry point
 tools/measure_noise.py   run the baseline with several seeds to measure the proxy noise
+tools/compare_runs.py    method-comparison table over finished runs (mean ± std over seeds)
+tools/principle_calibration.py   hit rate of cited principles per confidence bin (are confidences meaningful?)
 configs/                 cls_resnet50_cifar100.yaml (real runs), smoke_cpu.yaml (plumbing test)
 ```
 
@@ -50,54 +53,92 @@ export PYTHONPATH=$PWD
 
 1. Dry run, with no GPU and no API key. The mock LLM and mock scores are for testing the pipeline only; never put them in the paper:
    ```bash
-   python run_search.py --mode agent_reflect --dry_run --max_rounds 12
+   python run_search.py --mode agent_reflect --dry_run
    ```
 2. Measure the proxy noise, then write the std into `noise_level` / `min_improvement` in the yaml:
    ```bash
    python tools/measure_noise.py --config configs/cls_resnet50_cifar100.yaml --seeds 0 1 2
    ```
-3. Formal search. Use the same `max_rounds` for all three modes, and seeds 0/1/2:
+3. Formal search. Every method gets the same budget (`max_rounds: 10` in the yaml) and seeds 0/1/2:
    ```bash
-   export ANTHROPIC_API_KEY=...        # set it yourself; never commit it to the repository
-   python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode random        --seed 0
-   python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent         --seed 0
-   python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
+   export DEEPSEEK_API_KEY=...         # set it yourself in the shell (e.g. ~/.bashrc); never commit it
+   # (with --provider anthropic: export ANTHROPIC_API_KEY=... instead)
+   for m in random reg_evo tpe genius evoprompting llmatic lapt nader agent agent_reflect; do
+     python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode $m --seed 0
+   done
    ```
-   If a run is interrupted, run the same command again: it resumes from the last finished round. If a trial finished but was not yet recorded, its `result.json` is read directly and the trial is not retrained.
-4. Ablations and transfer:
+   If a run is interrupted, run the same command again: it resumes from the last finished round (controller state such as LLMatic's archives or NADER's experience store is restored too). If a trial finished but was not yet recorded, its `result.json` is read directly and the trial is not retrained.
+4. Ablations (each gets its own run directory, e.g. `runs/classification_agent_reflect_rule_s0`):
+
+   | Research plan | Flag |
+   |---|---|
+   | D-1 no failure memory | `--no_failure_memory` |
+   | D-2 no principle memory | `--no_principle_memory` |
+   | D-3 no mutation budget | `--mutation_budget 4` |
+   | D-4 no explore/exploit schedule | `--explore_every 0` |
+   | D-5 reflection frequency | `--reflect_every_n 1` / `2` / `4` |
+   | D-6 rule-based "reflection" (LLMENAS trigger: no improvement → change direction, improvement → refine) | `--reflection_style rule` |
+   | D-7 immediate reflection without memory (RZ-NAS style) | `--reflection_style immediate` |
+   | Design Agent without the cost table | `--no_param_costs` |
+   | Principle transfer | `--init_principles runs/<other run>/principle_memory.json` (also works for `--mode lapt`) |
+   | Budget sensitivity | `--max_rounds 30` |
+5. Comparison table:
    ```bash
-   python run_search.py ... --mode agent_reflect --no_principle_memory
-   python run_search.py ... --mode agent_reflect --no_failure_memory
-   python run_search.py ... --mode agent_reflect --init_principles runs/<other run>/principle_memory.json
+   python tools/compare_runs.py --runs runs --task classification --out runs/comparison
    ```
 
-### Outputs (`runs/<task>_<mode>_s<seed>/`)
+### Outputs (`runs/<task>_<mode>[_<variant>]_s<seed>/`)
 
 | File | Contents |
 |---|---|
-| `search_history.csv` | One row per round: architecture, score, params, Δ vs baseline / Δ vs previous best, param ratio, is_best, explore/exploit, failure reason, duration, agent rationale |
-| `search_summary.json` | Best result, rounds to best, GPU hours, LLM calls and tokens, final principles, failure list, stop reason |
+| `search_history.csv` | One row per round: architecture, score, params, Δ vs baseline / Δ vs previous best, param ratio, is_best, explore/exploit, failure reason, duration, proposer note |
+| `search_summary.json` | Best result and its Δparams, rounds to best, invalid-trial rate and failure reasons, fallback proposals, GPU hours, LLM calls and tokens, final principles, stop reason |
 | `evolution.json` | Best-so-far curve, for the search-efficiency plot |
-| `trial_memory.json` / `failure_memory.json` / `principle_memory.json` / `reflections.json` | Agent memory (used for resume and transfer) |
-| `llm_calls.jsonl` | Every LLM call: tokens, latency, served_model, request_id, errors |
+| `trial_memory.json` / `failure_memory.json` / `principle_memory.json` / `reflections.json` | Agent memory (used for resume and transfer). Each trial stores the principles it cited with their confidence at that moment; each principle stores its full evidence log (round, type, strength, before → after) |
+| `controller_state.json` | State of the comparison method (archives, learned subspace, experiences, ...) |
+| `llm_calls.jsonl` | Every LLM call: purpose, effort, tokens, latency, served_model, request_id, errors |
 | `trials/r###_<signature>/` | Each candidate's MMPretrain config, training log and result.json (checkpoints are deleted by default) |
+
+`tools/compare_runs.py` adds, per method, the sample-efficiency metric of Li & Talwalkar (UAI 2019): how many random-search trials are needed to reach the score the method reached, and that number divided by the method's rounds to best (">" when some random runs never got there).
+
+## Comparison methods
+
+All are re-implemented under our search space (the official code of every LLM method is tied to its own search space), share the runner, budget and seeds, and return the same JSON as the Design Agent. An unusable LLM answer is retried once with feedback, then replaced by a random untried architecture; such trials are counted in `n_fallback_proposals`. Settings live under `baselines:` in the yaml. Deviations to report in the paper:
+
+| Method | Original | Here | Deviation |
+|---|---|---|---|
+| Random (Li & Talwalkar, UAI 2019) | uniform sampling | without replacement | none |
+| Reg-Evo (Real et al., AAAI 2019) | P=100, S=25, 20k models | P=4, S=2: 4 random, then tournament + 1-dimension mutation, oldest removed | population scaled to the budget |
+| TPE (Bergstra et al., NeurIPS 2011) | 200 trials, first 30 random | Optuna TPESampler, categorical, `n_startup_trials=3` | Optuna's default of 10 startup trials would be the whole budget |
+| GENIUS (Zheng et al., 2023) | one GPT-4 conversation, temperature 0, 10 iterations | one conversation, structured JSON, rebuilt from memory each round; temperature 0 requested | temperature applies only with DeepSeek `--thinking off`; generic expert persona; no human transcription step |
+| EvoPrompting (Chen et al., NeurIPS 2023) | 10 rounds × 160 children, top-10 parents, 2-shot, prompt-tuning, mixed temperature | 2 generations × 5 children, top-4, 2-shot, target metrics (90% params / 102% accuracy), fitness −params × error | no soft prompt-tuning (API model); temperature mixing applies only with DeepSeek `--thinking off` |
+| LLMatic (Nasir et al., GECCO 2024) | network archive 100 CVT niches (width/depth, FLOPs); prompt archive (16 prompts × temperature); 2000 evaluations | network archive 3×3 (Δparams bin × target_stage); prompt archive (13 instructions × temperature 0.3/0.6/0.9 when temperature applies, else × effort low/medium/high); mutation 0.7 / crossover 0.3; curiosity +1 / −0.5 / −1 | archives scaled down; effort replaces temperature in thinking mode; instructions re-worded for our space; code-vs-paper differences resolved in favour of the paper |
+| LAPT (Zhou et al., AAAI 2025) | principles from 50 top architectures of a previous task, ≤2 options per layer, REA, adaptation per iteration | 3 random trials (or `--init_principles` for the transfer setting), principles → ≤2 options per dimension, REA (P=2, S=2) inside, adaptation every 2 trials with the top-2 | fewer samples to learn from |
+| NADER (Yang et al., CVPR 2025) | Reader + Proposer + Modifier + Reflector on computation graphs; experience store built offline, OpenAI embeddings | no Reader (LLM proposes 10 inspirations); Proposer picks (parent, inspiration) from the tree; Modifier applies it with top-5 retrieved experiences; failures reflected every 2 trials | config space instead of graphs (no development reflector); drop threshold = noise level instead of 90% of the parent (`drop_threshold: null` restores it); bag-of-words retrieval |
 
 ## Design decisions
 
 - **Fairness.** All methods share the same search space, the same runner, the same trial budget and the same seeds. Early stopping is off by default (`early_stop_patience: 0`).
+- **Budget.** `max_rounds: 10`, as in the research plan. Population-based methods are scaled down accordingly (table above); the `--max_rounds 30` sensitivity run checks that the conclusions hold with a larger budget.
 - **Noise.** A new best must beat the previous one by at least `min_improvement`, which should be ≥ the proxy seed std. The noise level is also passed to both agents, so they don't chase noise.
+- **Cost awareness.** The Design Agent sees the parameter change of every candidate move (computed once by building all 86 models on CPU, cached in `param_table.json`). Results should always be reported as accuracy *and* Δparams.
 - **Failure protection.**
   - OOM, NaN, timeouts, crashes and score drops below −noise go into the failure memory, and those configurations are never proposed again.
   - A malformed or illegal LLM output is retried with feedback. If the retry also fails, the agent falls back to a legal local mutation.
   - A failed reflection does not stop the search.
   - A wrong API key or invalid request (`AgentClientFatal`) stops the search immediately, so GPU time is not spent on the fallback.
   - Five consecutive failures stop the search.
-- **LLM.** Defaults to `claude-opus-5-5` with structured JSON output. Server-side refusal fallback is on by default: if the main model declines a request, the server retries it with a fallback model. The model that actually answered each call is logged as `served_model` in `llm_calls.jsonl`. For strict reproducibility, switch it off with `--no_fallbacks`.
+- **LLM.** Defaults to DeepSeek V4.1 Flash (`deepseek-flash`, OpenAI-compatible API, key in `DEEPSEEK_API_KEY`) in thinking mode. DeepSeek's JSON mode guarantees valid JSON but not the schema, so the schema is written into the system prompt and every answer is validated (invalid → one retry with feedback → legal fallback, counted in `n_fallback_proposals`). In thinking mode DeepSeek ignores temperature; `--thinking off` makes the baselines' temperatures (GENIUS 0, EvoPrompting mixed, LLMatic levels) take effect. All methods in one comparison must use the same LLM setting. `--provider anthropic` switches to `claude-opus-5-5` (schema enforced server-side, refusal fallback on, no temperature). Every call is logged with tokens (incl. reasoning tokens), latency and the model that answered.
+- **Principle confidence.** Update rule after HypoExplore (Koo et al. 2026): supports c ← c + 0.2·s·(1−c), contradicts c ← c − 0.2·s·c, new principles start at 0.5, confirmed > 0.75, refuted < 0.25. Only trials since the previous reflection count as new evidence, and each principle gets at most one update per reflection, so no trial is counted twice.
 
 ## Status
 
-- [x] Innovations 1 and 2, Random baseline, classification runner, resume, reporting
-- [x] Tested: dry runs of all three modes, resume giving identical results, failure and space-exhaustion paths, all 86 architectures building in MMPretrain, a real end-to-end CPU training smoke test
-- [ ] The other 7 comparison methods (RegEvo, TPE, GENIUS, EvoPrompting, LLMatic, LAPT, NADER) as `controllers/*`
+- [x] Innovations 1 and 2, classification runner, resume, reporting
+- [x] Cost table for the Design Agent; ablations D-1 … D-7
+- [x] All 8 comparison methods (Random, Reg-Evo, TPE, GENIUS, EvoPrompting, LLMatic, LAPT, NADER)
+- [x] `tools/compare_runs.py` (mean ± std, invalid-trial rate, multiple of random search)
+- [x] Tested: dry runs of all 10 modes and every ablation flag; an interrupted-and-resumed run equals an uninterrupted one for every mode; all 86 architectures build in MMPretrain; a real end-to-end CPU training smoke test (earlier commit)
+- [x] DeepSeek V4.1 Flash provider (tested offline against a fake API: request shape, temperature handling, error mapping, key never logged); evidence-based principle confidence, falsifiable principles, citation logging, calibration tool
+- [ ] Not yet tested: any method against the real DeepSeek / Claude API and real training (only dry runs so far); `param_table()` on the real MMPretrain environment
 - [ ] Detection (MMDetection) and segmentation (MMSegmentation) runners
 - [ ] Visualisation scripts (evolution curves, Grad-CAM heatmaps)

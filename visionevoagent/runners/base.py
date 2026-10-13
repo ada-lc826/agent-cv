@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Optional
 
 from ..search_space import Architecture
 
@@ -24,3 +24,9 @@ class BaseRunner(ABC):
     @abstractmethod
     def run(self, arch: Architecture, tag: str) -> TrialResult:
         """Train/evaluate `arch`. Must never raise: failures are returned as status='failed'."""
+
+    def param_table(self, task: str) -> Optional[Dict[str, float]]:
+        """Parameters (millions) of every architecture in the search space, keyed by signature,
+        computed without training. None if the runner cannot provide it; agents then work
+        without the cost table."""
+        return None

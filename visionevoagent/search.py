@@ -25,8 +25,9 @@ log = logging.getLogger(__name__)
 class SearchConfig:
     task: str = "classification"
     mode: str = "agent_reflect"
+    variant: str = ""                    # ablation / setting tag, part of the run identity (see run_search.py)
     seed: int = 0
-    max_rounds: int = 20                 # trial budget, baseline excluded
+    max_rounds: int = 10                 # trial budget, baseline excluded (research plan: 10; 30 for the sensitivity run)
     min_improvement: float = 0.2         # a new best must beat the old one by this much (>= proxy noise)
     noise_level: float = 0.2             # seed std of the proxy score; deltas below it are "no effect"
     early_stop_patience: int = 0         # 0 = off (must be off in method comparisons)
@@ -36,7 +37,7 @@ class SearchConfig:
 
 
 def _fingerprint(cfg: SearchConfig) -> Dict[str, Any]:
-    return {k: getattr(cfg, k) for k in ("task", "mode", "seed")}
+    return {k: getattr(cfg, k) for k in ("task", "mode", "seed", "variant")}
 
 
 class SearchEngine:
@@ -48,6 +49,23 @@ class SearchEngine:
         os.makedirs(cfg.run_dir, exist_ok=True)
         self.memory = memory or ArchitectureMemory.load(cfg.run_dir)
         self._check_resume()
+        self._load_controller_state()
+
+    # ------------------------------------------------------------------
+    def _state_path(self) -> str:
+        return os.path.join(self.cfg.run_dir, "controller_state.json")
+
+    def _load_controller_state(self) -> None:
+        path = self._state_path()
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                self.controller.state = json.load(f)
+
+    def _save_controller_state(self) -> None:
+        tmp = self._state_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.controller.state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self._state_path())
 
     def _check_resume(self) -> None:
         path = os.path.join(self.cfg.run_dir, "run_config.json")
@@ -55,7 +73,7 @@ class SearchEngine:
             with open(path, encoding="utf-8") as f:
                 old = json.load(f)
             for k, v in _fingerprint(self.cfg).items():
-                if old.get(k) != v:
+                if old.get(k, "" if k == "variant" else None) != v:  # runs saved before `variant` existed
                     raise ValueError(f"run_dir {self.cfg.run_dir} belongs to a run with {k}={old.get(k)!r}, "
                                      f"not {v!r}; use a new --run_dir")
             if self.memory.trials:
@@ -88,7 +106,7 @@ class SearchEngine:
             if bad or architecture_signature(arch) in mem.tried_signatures():
                 raise RuntimeError(f"controller {self.controller.name} returned an illegal candidate: "
                                    f"{bad or 'already tried'}")  # a controller bug, not a trial failure
-            trial = self._evaluate(r, arch, prop.note, prop.search_mode)
+            trial = self._evaluate(r, arch, prop.note, prop.search_mode, prop.cited_principles)
             log.info("round %d [%s] %s -> %s%s", r, prop.search_mode or "-", trial.signature,
                      trial.score if trial.status == "ok" else f"FAILED({trial.failure_reason})",
                      "  * new best" if trial.is_best else "")
@@ -101,6 +119,7 @@ class SearchEngine:
             except Exception:  # noqa: BLE001 -- reflection must never kill the search
                 log.exception("round %d: after_trial hook failed", r)
             mem.save()
+            self._save_controller_state()
             write_reports(mem, cfg, "running")
 
             reason = self._should_stop(r)
@@ -126,14 +145,15 @@ class SearchEngine:
         b = self.memory.best_trial()
         return b.score if b else self.memory.baseline.score
 
-    def _evaluate(self, r: int, arch, note: str, mode: str) -> Trial:
+    def _evaluate(self, r: int, arch, note: str, mode: str, cited: Optional[list] = None) -> Trial:
         mem, cfg = self.memory, self.cfg
         sig = architecture_signature(arch)
         best_before = self._current_best_score()
         res = self.runner.run(arch, f"r{r:03d}_{sig}")
         t = Trial(round=r, architecture=arch, signature=sig, status=res.status, score=res.score,
                   params=res.params, failure_reason=res.failure_reason, search_mode=mode,
-                  proposer_note=note, duration_s=res.duration_s, task=cfg.task)
+                  proposer_note=note, duration_s=res.duration_s, task=cfg.task,
+                  cited_principles=list(cited or []))
         base = mem.baseline
         if res.status == "ok":
             t.delta_vs_baseline = round(res.score - base.score, 3)

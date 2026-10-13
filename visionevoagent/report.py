@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+from collections import Counter
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Dict, List
 
@@ -66,16 +67,26 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
     summary = {
         "task": cfg.task, "mode": cfg.mode, "seed": cfg.seed, "stop_reason": stop_reason,
         "rounds_done": mem.last_round(), "max_rounds": cfg.max_rounds,
+        "variant": getattr(cfg, "variant", ""),
         "n_trials": len(mem.trials), "n_ok": len(ok), "n_failed": len(mem.trials) - len(ok),
+        # share of trials that produced no score (crash / OOM / NaN / timeout); compare with LLM-GE's 40-52%
+        "invalid_trial_rate": round((len(mem.trials) - len(ok)) / len(mem.trials), 3) if mem.trials else None,
+        "failure_reasons": dict(Counter(t.failure_reason or "unknown" for t in mem.trials if t.status != "ok")),
+        # trials proposed by a fallback (LLM answer unusable) rather than by the method itself
+        "n_fallback_proposals": sum(1 for t in mem.trials if "fallback" in t.proposer_note.split(":")[0]),
         "baseline": asdict(mem.baseline) if mem.baseline else None,
         "best": asdict(best) if best else None,
         "best_improvement": round(best.score - mem.baseline.score, 3) if best and mem.baseline
         and best.score is not None and mem.baseline.score is not None else None,
+        "best_delta_params": round(best.params - mem.baseline.params, 3) if best and mem.baseline
+        and best.params is not None and mem.baseline.params is not None else None,
         "rounds_to_best": best.round if best else None,
         "gpu_hours": round(sum(t.duration_s for t in rows) / 3600, 3),
         "llm": _llm_usage(root),
         "n_reflections": len(mem.reflections),
-        "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: (-p.support_count, -p.confidence))],
+        "principle_status": dict(Counter(p.status for p in mem.principles)),
+        "n_trials_citing_principles": sum(1 for t in mem.trials if t.cited_principles),
+        "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: -p.confidence)],
         "failures": [asdict(x) for x in mem.failures],
     }
     with open(os.path.join(root, "search_summary.json"), "w", encoding="utf-8") as f:

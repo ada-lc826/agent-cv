@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ..search_space import Architecture, canonicalize
+from ..search_space import Architecture, all_architectures, architecture_signature, canonicalize
 from .base import BaseRunner, TrialResult
 
 log = logging.getLogger(__name__)
@@ -175,6 +175,48 @@ class MMPretrainRunner(BaseRunner):
         if p.returncode != 0:
             raise RuntimeError(p.stderr[-2000:])
         return round(json.loads(p.stdout.strip().splitlines()[-1])["params"], 3)
+
+
+    def param_table(self, task: str) -> Optional[Dict[str, float]]:
+        """Build every architecture once (one subprocess, CPU) and cache the counts in
+        <work_root>/param_table.json. Used for the Design Agent's cost table, never for scores."""
+        cache = os.path.join(self.cfg.work_root, "param_table.json")
+        if os.path.exists(cache):
+            with open(cache, encoding="utf-8") as f:
+                return json.load(f)
+        cfg_dir = os.path.join(self.cfg.work_root, "_param_configs")
+        os.makedirs(cfg_dir, exist_ok=True)
+        paths = {}
+        for a in all_architectures(task):
+            sig = architecture_signature(a)
+            paths[sig] = os.path.join(cfg_dir, f"{sig}.py")
+            with open(paths[sig], "w", encoding="utf-8") as f:
+                f.write(self.build_config(a))
+        code = ("import sys, json\n"
+                "from mmengine.config import Config\n"
+                "from mmengine.registry import init_default_scope\n"
+                "import visionevoagent.plugins.mmpretrain_evo\n"
+                "from mmpretrain.registry import MODELS\n"
+                "init_default_scope('mmpretrain')\n"
+                "out = {}\n"
+                "for sig, path in json.loads(sys.argv[1]).items():\n"
+                "    m = MODELS.build(Config.fromfile(path).model)\n"
+                "    out[sig] = round(sum(p.numel() for p in m.parameters()) / 1e6, 3)\n"
+                "print(json.dumps(out))\n")
+        env = self._env()
+        env["CUDA_VISIBLE_DEVICES"] = ""  # counting only; never take a GPU from a running trial
+        try:
+            p = subprocess.run([self.cfg.python, "-c", code, json.dumps(paths)], cwd=self.cfg.mmpretrain_root,
+                               env=env, capture_output=True, text=True, timeout=1800)
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr[-2000:])
+            table = json.loads(p.stdout.strip().splitlines()[-1])
+        except Exception as e:  # noqa: BLE001 -- the cost table is optional
+            log.warning("param table unavailable, agents run without it: %s", str(e)[-500:])
+            return None
+        with open(cache, "w", encoding="utf-8") as f:
+            json.dump(table, f, indent=2)
+        return table
 
 
 def parse_top1(work_dir: str) -> Optional[float]:

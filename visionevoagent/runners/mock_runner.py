@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import random
 
-from ..search_space import Architecture, architecture_signature, canonicalize
+from typing import Dict, Optional
+
+from ..search_space import Architecture, all_architectures, architecture_signature, canonicalize
 from .base import BaseRunner, TrialResult
 
 _EFFECT = {
@@ -52,4 +54,12 @@ class MockRunner(BaseRunner):
             + _PARAMS.get(("fusion", a["fusion"]), 0.0)
         rng = random.Random(f"mock-{self.seed}-{sig}")
         score += rng.gauss(0.0, self.noise_std)
-        return TrialResult("ok", score=round(score, 2), params=round(params, 3), duration_s=0.0, work_dir=tag)
+        return TrialResult("ok", score=round(score, 2), params=params, duration_s=0.0, work_dir=tag)
+
+    def _params(self, a: Architecture) -> float:
+        scale = {"early": 0.3, "late": 1.0, "all": 1.3}[a["target_stage"]]
+        return round(self.baseline_params + sum(_PARAMS.get((d, a[d]), 0.0) for d in ("attention", "conv")) * scale
+                     + _PARAMS.get(("fusion", a["fusion"]), 0.0), 3)
+
+    def param_table(self, task: str) -> Optional[Dict[str, float]]:
+        return {architecture_signature(a): self._params(canonicalize(a)) for a in all_architectures(task)}

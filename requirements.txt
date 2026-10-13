@@ -4,3 +4,9 @@ pyyaml
 
 # Classification runner (same stack as the reproduced baselines)
 # torch==2.1.2 (cu121), mmcv==2.1.0, mmengine==0.10.7, mmpretrain==1.2.0, numpy==1.26.4
+
+# Comparison method TPE (--mode tpe)
+optuna>=3.0
+
+# LLM provider DeepSeek (default; --provider deepseek)
+openai>=1.40
