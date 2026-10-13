@@ -38,10 +38,14 @@ class DesignAgent:
         self.seed = seed
         self.max_attempts = max_attempts
 
-    def propose(self, ctx: DesignContext) -> Tuple[Architecture, str]:
-        """Return (architecture, note). Never raises: falls back to a legal local mutation."""
+    def propose(self, ctx: DesignContext) -> Tuple[Architecture, str, List[str]]:
+        """Return (architecture, note, cited principle ids). Never raises: falls back to a legal local
+        mutation (which cites nothing)."""
         space = get_search_space(ctx.task)
         system = DESIGN_SYSTEM + (DESIGN_REFLECTION_ADDENDUM if ctx.reflection_context is not None else "")
+        known_ids = {p.get("id") for p in (ctx.reflection_context or {}).get("design_principles", [])
+                     if isinstance(p, dict) and p.get("id")}
+        schema = design_schema(ctx.task, with_citations=bool(known_ids))
         feedback = ""
         for attempt in range(1, self.max_attempts + 1):
             user = build_design_prompt(
@@ -51,7 +55,7 @@ class DesignAgent:
                 noise_level=ctx.noise_level, reflection_context=ctx.reflection_context,
                 candidate_costs=ctx.candidate_costs, feedback=feedback)
             try:
-                out = self.client.complete_json("design", system, user, design_schema(ctx.task),
+                out = self.client.complete_json("design", system, user, schema,
                                                 mock_fn=lambda: self._mock(ctx, attempt))
             except AgentClientFatal:
                 raise
@@ -64,10 +68,12 @@ class DesignAgent:
                 arch = canonicalize(out["architecture"])
                 reason = self._check_rules(arch, ctx)
                 if reason is None:
-                    return arch, f"llm: {out['rationale']}"
+                    cited = [c for c in dict.fromkeys(out.get("cited_principles", [])) if c in known_ids]
+                    return arch, f"llm: {out['rationale']}", cited
             log.info("design rejected (attempt %d): %s", attempt, reason)
             feedback = reason
-        return self._fallback(ctx)
+        arch, note = self._fallback(ctx)
+        return arch, note, []
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -115,7 +121,10 @@ class DesignAgent:
                 prior = sum(vals) / len(vals) if vals else (0.5 if ctx.search_mode == "explore" else 0.0)
                 cands.append((prior + rng.uniform(0, 0.05), arch, d, v))
         if not cands:
-            return {"architecture": best, "rationale": "mock: no untried single mutation"}
+            return {"architecture": best, "rationale": "mock: no untried single mutation", "cited_principles": []}
         cands.sort(key=lambda x: x[0], reverse=True)
         _, arch, d, v = cands[0]
-        return {"architecture": arch, "rationale": f"mock: set {d}={v} (best mean delta so far)"}
+        principles = (ctx.reflection_context or {}).get("design_principles", [])
+        cited = [p["id"] for p in principles if isinstance(p, dict) and f"{d}={v}" in p.get("principle", "")]
+        return {"architecture": arch, "rationale": f"mock: set {d}={v} (best mean delta so far)",
+                "cited_principles": cited}

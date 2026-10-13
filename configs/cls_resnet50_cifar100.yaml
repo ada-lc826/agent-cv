@@ -9,13 +9,13 @@ search:
 
 agent:
   client:
-    provider: anthropic      # needs ANTHROPIC_API_KEY
-    model: claude-opus-5-5
-    effort: medium
-    use_fallbacks: true      # server-side refusal fallback; served_model is logged per call
+    provider: deepseek       # needs DEEPSEEK_API_KEY (never commit it); alternative: anthropic + ANTHROPIC_API_KEY
+    model: deepseek-flash    # DeepSeek V4.1 Flash (for anthropic: claude-opus-5-5)
+    effort: medium           # DeepSeek reasoning_effort: low->low, medium/high->high, xhigh/max->max
+    thinking: true           # DeepSeek thinking mode (its default); false makes baseline temperatures apply
+    use_fallbacks: true      # anthropic only: server-side refusal fallback
   search:
     reflect_every_n: 2
-    recent_n: 4
     mutation_budget: 1
     stagnation_budget: 2
     stagnation_rounds: 3

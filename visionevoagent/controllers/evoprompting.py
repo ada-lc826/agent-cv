@@ -8,8 +8,8 @@ soft prompt-tuning between rounds, mixed sampling temperature.
 Here: generations of `children_per_gen` trials (2 x 5 for a 10-trial budget), one sample per prompt,
 k=2 parents drawn from the top p=4 of everything evaluated before the generation started (baseline
 included), fitness = -(params x (100 - top1)). Not reproduced: soft prompt-tuning (API model, no
-weights) and temperature mixing (Claude Opus 5.5 rejects `temperature`); diversity comes from the
-different parent pairs. Retired parents are kept in controller state.
+weights). Mixed temperature (uniform over {0.2, 0.6, 0.8, 1.0}) is requested per child and applied when the
+client can (DeepSeek with thinking disabled); otherwise diversity comes only from the parent pairs. Retired parents are kept in controller state.
 """
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from ..baseline_prompts import EVOPROMPTING_SYSTEM, evoprompting_prompt
 from ..memory import ArchitectureMemory, Trial
 from .base import BaseController, Proposal
 from .llm_common import ask_architecture, fmt_arch, fmt_space, mock_neighbour, ok_trials_with_baseline
+
+
+TEMPERATURES = (0.2, 0.6, 0.8, 1.0)   # the paper's mixed-temperature sampling
 
 
 def fitness(t: Trial) -> float:
@@ -61,8 +64,9 @@ class EvoPromptingController(BaseController):
             self.task, fmt_space(self.task),
             [{"params": p.params, "score": p.score, "arch": fmt_arch(p.architecture)} for p in parents], target)
         tried = memory.tried_signatures()
+        temperature = self.rng(round_, "temperature").choice(TEMPERATURES)
         arch, why, _ = ask_architecture(
-            self.client, "evoprompting", EVOPROMPTING_SYSTEM, prompt, self.task, tried,
+            self.client, "evoprompting", EVOPROMPTING_SYSTEM, prompt, self.task, tried, temperature=temperature,
             mock_fn=lambda att: mock_neighbour(parents[0].architecture, self.task, tried,
                                                self.rng(round_, f"mock{att}")))
         if arch is None:

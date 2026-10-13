@@ -34,6 +34,9 @@ class Trial:
     is_best: bool = False
     duration_s: float = 0.0
     task: str = ""
+    # Principles the Design Agent said it relied on, with their confidence/status at proposal time:
+    # [{"id", "confidence", "status"}]. Used for the calibration analysis (tools/principle_calibration.py).
+    cited_principles: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -44,14 +47,43 @@ class Failure:
     round: int = -1
 
 
+# Evidence-based confidence (after HypoExplore, Koo et al. 2026, Eq. 1):
+#   supports:    c <- c + ETA * s * (1 - c)        contradicts: c <- c - ETA * s * c
+# with evidence strength s in [0, 1]. New principles start at maximal uncertainty (0.5).
+ETA = 0.2
+INITIAL_CONFIDENCE = 0.5
+CONFIRMED_AT = 0.75
+REFUTED_AT = 0.25
+CONF_BOUNDS = (0.01, 0.99)
+PRINCIPLE_FIELDS = ("if", "scope", "then", "because", "disproved_if")
+
+
+def render_principle(f: Dict[str, str]) -> str:
+    """Falsifiable form: IF <choice> IN <scope>, THEN <predicted effect>, BECAUSE <mechanism>. DISPROVED IF <...>."""
+    return (f"IF {f.get('if', '').strip()} IN {f.get('scope', '').strip()}, THEN {f.get('then', '').strip()}, "
+            f"BECAUSE {f.get('because', '').strip()}. DISPROVED IF {f.get('disproved_if', '').strip()}.")
+
+
 @dataclass
 class Principle:
-    principle: str
-    confidence: float
-    support_count: int = 1
+    principle: str                       # rendered statement (see render_principle)
+    confidence: float = INITIAL_CONFIDENCE
+    support_count: int = 0               # number of supporting evidence updates
     task: str = ""
     first_round: int = -1
     last_round: int = -1
+    id: str = ""
+    fields: Dict[str, str] = field(default_factory=dict)   # if / scope / then / because / disproved_if
+    contradict_count: int = 0
+    neutral_count: int = 0
+    status: str = "uncertain"            # uncertain | confirmed | refuted
+    # [{"round", "type": supports|contradicts|neutral, "strength", "trials", "reason", "before", "after"}]
+    evidence: List[Dict[str, Any]] = field(default_factory=list)
+    transferred_from: str = ""           # task (or run) the principle was learned in, for transferred ones
+
+
+def _status(conf: float) -> str:
+    return "confirmed" if conf > CONFIRMED_AT else ("refuted" if conf < REFUTED_AT else "uncertain")
 
 
 def _norm(text: str) -> str:
@@ -100,23 +132,40 @@ class ArchitectureMemory:
         mem.trials = [Trial(**t) for t in read("trial_memory.json", [])]
         mem.failures = [Failure(**x) for x in read("failure_memory.json", [])]
         mem.principles = [Principle(**x) for x in read("principle_memory.json", [])]
+        mem._ensure_ids()
         mem.reflections = read("reflections.json", [])
         b = read("baseline.json", None)
         mem.baseline = Trial(**b) if b else None
         return mem
 
     def load_principles_from(self, path: str, task: str = "") -> int:
-        """Cold-start from another run's principle memory (principle-transfer experiments)."""
+        """Cold-start from another run's principle memory (principle-transfer experiments).
+
+        Refuted principles are not transferred. The others keep their confidence and evidence log, get a
+        fresh id in this run and `transferred_from`; new evidence in this task keeps updating them."""
         with open(path, encoding="utf-8") as f:
             items = json.load(f)
         n = 0
         for x in items:
             p = Principle(**x)
-            p.principle = f"[transferred{(' from ' + p.task) if p.task else ''}] {p.principle}"
+            if p.status == "refuted":
+                continue
+            p.transferred_from = p.transferred_from or p.task or os.path.basename(os.path.dirname(path))
             p.task = task or p.task
+            p.id = self._next_principle_id()
             self.principles.append(p)
             n += 1
         return n
+
+    def _next_principle_id(self) -> str:
+        nums = [int(p.id[1:]) for p in self.principles if re.fullmatch(r"p\d+", p.id or "")]
+        return f"p{max(nums, default=0) + 1}"
+
+    def _ensure_ids(self) -> None:
+        """Principle files written before ids existed get ids in list order."""
+        for p in self.principles:
+            if not p.id:
+                p.id = self._next_principle_id()
 
     # ---------------- queries ----------------
     def tried_signatures(self) -> set:
@@ -153,22 +202,53 @@ class ArchitectureMemory:
         if failure.architecture_signature not in self.failed_signatures():
             self.failures.append(failure)
 
-    def merge_principles(self, texts: List[str], confidence: float, task: str, round_: int) -> None:
-        """Add principles; repeated principles (same normalised text) gain support instead of duplicating."""
-        index = {_norm(p.principle): p for p in self.principles}
-        for text in texts:
-            key = _norm(text)
-            if not key:
-                continue
-            if key in index:
-                p = index[key]
-                p.support_count += 1
-                p.confidence = round(max(p.confidence, confidence), 3)
-                p.last_round = round_
-            else:
-                p = Principle(text, round(confidence, 3), 1, task, round_, round_)
-                self.principles.append(p)
-                index[key] = p
+    def principle(self, pid: str) -> Optional[Principle]:
+        return next((p for p in self.principles if p.id == pid), None)
+
+    def update_principle(self, pid: str, evidence: str, strength: float, round_: int,
+                         reason: str = "", trials: str = "") -> Optional[Principle]:
+        """Apply one piece of evidence. Returns None for an unknown id. Neutral evidence is logged only."""
+        p = self.principle(pid)
+        if p is None or evidence not in ("supports", "contradicts", "neutral"):
+            return None
+        s = min(1.0, max(0.0, float(strength)))
+        before = p.confidence
+        if evidence == "supports":
+            p.confidence = before + ETA * s * (1.0 - before)
+            p.support_count += 1
+        elif evidence == "contradicts":
+            p.confidence = before - ETA * s * before
+            p.contradict_count += 1
+        else:
+            p.neutral_count += 1
+        p.confidence = round(min(CONF_BOUNDS[1], max(CONF_BOUNDS[0], p.confidence)), 4)
+        p.status = _status(p.confidence)
+        p.last_round = round_
+        p.evidence.append({"round": round_, "type": evidence, "strength": round(s, 3), "trials": trials,
+                           "reason": reason, "before": before, "after": p.confidence})
+        return p
+
+    def add_principle(self, fields: Dict[str, str], task: str, round_: int,
+                      already_updated: Optional[set] = None) -> Principle:
+        """Add a new falsifiable principle at confidence 0.5. If the same statement already exists
+        (normalised text), the restatement counts as moderate supporting evidence instead, unless that
+        principle already received evidence in this reflection (`already_updated`)."""
+        text = render_principle(fields)
+        key = _norm(text)
+        for p in self.principles:
+            if _norm(p.principle) == key:
+                if p.id not in (already_updated or set()):
+                    self.update_principle(p.id, "supports", 0.5, round_, reason="restated by the reflector")
+                return p
+        p = Principle(text, INITIAL_CONFIDENCE, 0, task, round_, round_, id=self._next_principle_id(),
+                      fields={k: str(fields.get(k, "")) for k in PRINCIPLE_FIELDS})
+        self.principles.append(p)
+        return p
+
+    def active_principles(self) -> List[Principle]:
+        """Principles that may guide design: not refuted, most confident first."""
+        live = [p for p in self.principles if p.status != "refuted"]
+        return sorted(live, key=lambda p: (p.confidence, p.support_count - p.contradict_count), reverse=True)
 
     def add_reflection(self, round_: int, reflection: Dict[str, Any]) -> None:
         self.reflections.append({"round": round_, **reflection})

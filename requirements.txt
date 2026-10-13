@@ -7,3 +7,6 @@ pyyaml
 
 # Comparison method TPE (--mode tpe)
 optuna>=3.0
+
+# LLM provider DeepSeek (default; --provider deepseek)
+openai>=1.40

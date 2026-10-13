@@ -50,7 +50,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max_rounds", type=int)
     p.add_argument("--run_dir", default="")
     p.add_argument("--dry_run", action="store_true", help="mock runner + mock LLM; numbers are fake")
-    p.add_argument("--provider", choices=("anthropic", "mock"))
+    p.add_argument("--provider", choices=("deepseek", "anthropic", "mock"))
+    p.add_argument("--thinking", choices=("on", "off"),
+                   help="DeepSeek thinking mode (default on); off lets baseline temperatures take effect")
     p.add_argument("--model")
     p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
     p.add_argument("--no_fallbacks", action="store_true", help="disable server-side refusal fallbacks")
@@ -90,6 +92,8 @@ def variant_tag(a: argparse.Namespace) -> str:
         parts.append("transfer")
     if a.max_rounds is not None:
         parts.append(f"t{a.max_rounds}")
+    if a.thinking == "off":
+        parts.append("nothink")
     return "-".join(parts)
 
 
@@ -105,6 +109,8 @@ def build_client(a: argparse.Namespace, ya: dict, run_dir: str) -> AgentClient:
         ccfg.effort = a.effort
     if a.no_fallbacks:
         ccfg.use_fallbacks = False
+    if a.thinking:
+        ccfg.thinking = a.thinking == "on"
     return AgentClient(ccfg, log_path=os.path.join(run_dir, "llm_calls.jsonl"))
 
 

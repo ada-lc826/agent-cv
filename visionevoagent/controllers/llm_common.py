@@ -43,7 +43,7 @@ def fmt_result(t: Trial, metric: str) -> str:
 
 def ask_architecture(client: AgentClient, purpose: str, system: str, prompt: Union[str, Conversation],
                      task: str, exclude: set, mock_fn: Callable[[int], Dict[str, Any]],
-                     max_attempts: int = 2, effort: Optional[str] = None
+                     max_attempts: int = 2, effort: Optional[str] = None, temperature: Optional[float] = None
                      ) -> Tuple[Optional[Architecture], str, Union[str, Conversation]]:
     """Ask for one new architecture. Returns (architecture or None, rationale, prompt incl. feedback).
 
@@ -54,7 +54,7 @@ def ask_architecture(client: AgentClient, purpose: str, system: str, prompt: Uni
     for attempt in range(1, max_attempts + 1):
         try:
             out = client.complete_json(purpose, system, convo, design_schema(task),
-                                       mock_fn=lambda: mock_fn(attempt), effort=effort)
+                                       mock_fn=lambda: mock_fn(attempt), effort=effort, temperature=temperature)
         except AgentClientFatal:
             raise
         except AgentClientError as e:

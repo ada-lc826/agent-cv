@@ -4,9 +4,11 @@ Two quality-diversity archives (MAP-Elites style):
   - network archive: cell = (parameter-change bin, target_stage), elite = best score in the cell.
     Original: CVT grid of 100 niches over (width/depth ratio, FLOPs). 3x3 here, because 10 trials
     cannot fill 100 niches and our architectures differ in where/what is inserted, not in width/depth.
-  - prompt archive: cell = (instruction id, effort level), value = curiosity.
-    Original second dimension: sampling temperature. Claude Opus 5.5 rejects `temperature`, so the
-    effort level (low/medium/high) is the closest available knob; reported as a deviation.
+  - prompt archive: cell = (instruction id, sampling level), value = curiosity.
+    Original second dimension: sampling temperature. When the client applies temperature (DeepSeek with
+    thinking disabled) the levels are temperatures 0.3 / 0.6 / 0.9 (paper: initial 0.6, range 0-1);
+    otherwise (DeepSeek thinking mode, or Claude, which rejects temperature) the effort level
+    low / medium / high is the closest available knob, reported as a deviation.
 Operators follow the paper (mutation 0.7 / crossover 0.3; the official code uses 0.85 / 0.15).
 Curiosity: +1 if the child entered the network archive, -0.5 if it did not, -1 if it failed to train
 (the paper's rule; the official code has no -1 case). Mutation picks a random archive network and,
@@ -24,6 +26,7 @@ from .base import BaseController, Proposal
 from .llm_common import ask_architecture, fmt_arch, fmt_space, mock_neighbour
 
 EFFORTS = ("low", "medium", "high")
+TEMPERATURE_LEVELS = (0.3, 0.6, 0.9)
 
 
 class LLMaticController(BaseController):
@@ -36,6 +39,8 @@ class LLMaticController(BaseController):
         self.p_mutation = p_mutation
         self.random_init = random_init
         self.param_bins = param_bins          # |Δparams| in millions: small < 0.5 <= medium < 2.0 <= large
+        self.knob = "temperature" if client.temperature_effective else "effort"
+        self.levels = TEMPERATURE_LEVELS if self.knob == "temperature" else EFFORTS
 
     # ------------------------------------------------------------------ archives (in controller state)
     def _net_cell(self, t: Trial, base_params: float) -> str:
@@ -66,15 +71,15 @@ class LLMaticController(BaseController):
         elites = [by_round[v["round"]] for v in arc.values() if v["round"] in by_round]
 
         if round_ <= self.random_init:
-            op, instr, effort, parents = "mutation", rng.randrange(len(LLMATIC_INSTRUCTIONS)), rng.choice(EFFORTS), \
-                [memory.baseline]
+            op, parents = "mutation", [memory.baseline]
+            instr, level = rng.randrange(len(LLMATIC_INSTRUCTIONS)), rng.choice(self.levels)
         elif len(elites) >= 2 and rng.random() >= self.p_mutation:
-            op, instr, effort = "crossover", None, "medium"
+            op, instr, level = "crossover", None, self.levels[1]
             parents = rng.sample(elites, 2)
         else:
             op = "mutation"
             parents = [rng.choice(elites)]
-            instr, effort = self._pick_prompt(rng)
+            instr, level = self._pick_prompt(rng)
 
         space = fmt_space(self.task)
         if op == "mutation":
@@ -84,24 +89,27 @@ class LLMaticController(BaseController):
             prompt = LLMATIC_CROSSOVER.format(space=space, a=fmt_arch(parents[0].architecture),
                                               b=fmt_arch(parents[1].architecture))
         arch, why, _ = ask_architecture(
-            self.client, f"llmatic_{op}", LLMATIC_SYSTEM, prompt, self.task, tried, effort=effort,
+            self.client, f"llmatic_{op}", LLMATIC_SYSTEM, prompt, self.task, tried, **self._call_kwargs(level),
             mock_fn=lambda att: mock_neighbour(parents[0].architecture, self.task, tried,
                                                self.rng(round_, f"mock{att}")))
-        self.state.setdefault("pending", {})[str(round_)] = {"op": op, "instruction": instr, "effort": effort,
+        self.state.setdefault("pending", {})[str(round_)] = {"op": op, "instruction": instr, "level": level,
                                                             "llm": arch is not None}
         names = "+".join(f"r{p.round:03d}" for p in parents)
         if arch is None:
             return Proposal(self.random_untried(memory, round_), note=f"llmatic-fallback ({op} of {names}): random")
-        label = f"instr {instr}, effort {effort}" if op == "mutation" else "crossover"
+        label = f"instr {instr}, {self.knob} {level}" if op == "mutation" else "crossover"
         return Proposal(arch, note=f"llmatic {op} of {names} ({label}): {why}")
 
-    def _pick_prompt(self, rng) -> Tuple[int, str]:
+    def _call_kwargs(self, level: Any) -> Dict[str, Any]:
+        return {"temperature": float(level)} if self.knob == "temperature" else {"effort": level}
+
+    def _pick_prompt(self, rng) -> Tuple[int, Any]:
         cur = self._prompt_archive()
         if cur and rng.random() < 0.5:
             key = max(sorted(cur), key=lambda k: cur[k])
-            i, e = key.split("|")
-            return int(i), e
-        return rng.randrange(len(LLMATIC_INSTRUCTIONS)), rng.choice(EFFORTS)
+            i, lv = key.split("|")
+            return int(i), (float(lv) if self.knob == "temperature" else lv)
+        return rng.randrange(len(LLMATIC_INSTRUCTIONS)), rng.choice(self.levels)
 
     # ------------------------------------------------------------------
     def after_trial(self, memory: ArchitectureMemory, round_: int) -> Optional[dict]:
@@ -115,7 +123,7 @@ class LLMaticController(BaseController):
                 arc[cell] = {"round": t.round, "score": t.score}
                 added = True
         if pend and pend["op"] == "mutation" and pend["llm"]:  # crossover and fallbacks don't score a prompt
-            key = f"{pend['instruction']}|{pend['effort']}"
+            key = f"{pend['instruction']}|{pend['level']}"
             cur = self._prompt_archive()
             delta = -1.0 if t.status != "ok" else (1.0 if added else -0.5)
             cur[key] = cur.get(key, 0.0) + delta

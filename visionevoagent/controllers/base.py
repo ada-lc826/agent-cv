@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from ..memory import ArchitectureMemory
 from ..search_space import Architecture, all_architectures, architecture_signature
@@ -19,6 +19,8 @@ class Proposal:
     architecture: Architecture
     note: str = ""
     search_mode: str = ""
+    # principles the proposal relies on, snapshot at proposal time: [{"id", "confidence", "status"}]
+    cited_principles: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class BaseController(ABC):

@@ -1,11 +1,14 @@
-"""Reflector Agent (innovation 2): induces design knowledge from the experiment history."""
+"""Reflector Agent (innovation 2): turns new experimental evidence into confidence updates for the
+existing design principles and, when warranted, proposes new falsifiable principles."""
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
+from ..memory import render_principle
 from ..prompts import REFLECTOR_SYSTEM, build_reflection_prompt
 from ..schemas import REFLECTION_SCHEMA, validate_reflection
 from ..search_space import DIMENSIONS, get_search_space
@@ -20,7 +23,7 @@ class ReflectionContext:
     baseline: Dict[str, Any]
     best: Dict[str, Any]
     history: List[Dict[str, Any]]
-    recent_n: int
+    new_trials: List[Dict[str, Any]]          # trials since the previous reflection: the only new evidence
     failed: List[Dict[str, Any]]
     noise_level: float
     previous_principles: List[Dict[str, Any]]
@@ -32,10 +35,11 @@ class ReflectorAgent:
         self.max_attempts = max_attempts
 
     def reflect(self, ctx: ReflectionContext) -> Optional[Dict[str, Any]]:
-        """Return a validated reflection dict, or None if every attempt failed (search continues)."""
+        """Return a validated reflection dict, or None if every attempt failed (search continues).
+        The returned dict also carries `design_principles`: the new principles rendered as text."""
         user = build_reflection_prompt(
             task=ctx.task, metric=ctx.metric, space=get_search_space(ctx.task), baseline=ctx.baseline,
-            history=ctx.history, recent_n=ctx.recent_n, best=ctx.best, failed=ctx.failed,
+            history=ctx.history, new_trials=ctx.new_trials, best=ctx.best, failed=ctx.failed,
             noise_level=ctx.noise_level, previous_principles=ctx.previous_principles)
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -48,6 +52,7 @@ class ReflectorAgent:
                 continue
             reason = validate_reflection(out)
             if reason is None:
+                out["design_principles"] = [render_principle(p) for p in out["new_principles"]]
                 return out
             log.warning("reflection rejected (attempt %d): %s", attempt, reason)
         return None
@@ -55,33 +60,53 @@ class ReflectorAgent:
     # ------------------------------------------------------------------
     @staticmethod
     def _mock(ctx: ReflectionContext) -> Dict[str, Any]:
-        """Statistical stand-in for the LLM (dry runs only): mean delta per module value."""
-        stats: Dict[Tuple[str, str], List[float]] = {}
-        for r in ctx.history:
-            if r["status"] == "ok" and r.get("delta_vs_baseline") is not None:
-                for d in DIMENSIONS:
-                    v = r["architecture"][d]
-                    if v not in ("none", "standard"):
-                        stats.setdefault((d, v), []).append(r["delta_vs_baseline"])
+        """Statistical stand-in for the LLM (dry runs only).
+
+        New principles say "IF <dim>=<value> ..."; evidence for an existing principle compares the new
+        trials that use <dim>=<value> with the noise level. Enough to exercise the confidence logic."""
+        def stats(rows: List[Dict[str, Any]], key: str) -> Dict[Tuple[str, str], List[float]]:
+            out: Dict[Tuple[str, str], List[float]] = {}
+            for r in rows:
+                if r["status"] == "ok" and r.get(key) is not None:
+                    for d in DIMENSIONS:
+                        v = r["architecture"][d]
+                        if v not in ("none", "standard"):
+                            out.setdefault((d, v), []).append(r[key])
+            return out
+
+        noise = ctx.noise_level
+        # patterns vs the baseline; evidence vs the best-so-far before each new trial (can be negative)
+        all_stats, new_stats = stats(ctx.history, "delta_vs_baseline"), stats(ctx.new_trials, "delta_vs_previous")
         eff, ineff = [], []
-        for (d, v), vals in sorted(stats.items()):
+        for (d, v), vals in sorted(all_stats.items()):
             mean = sum(vals) / len(vals)
-            conf = round(min(0.95, 0.4 + 0.15 * len(vals)), 2)
             item = {"pattern": f"{d}={v}", "evidence": f"mean delta {mean:+.2f} over {len(vals)} trials",
-                    "confidence": conf}
-            if mean > ctx.noise_level:
-                eff.append(item)
-            elif mean < -ctx.noise_level:
-                ineff.append(item)
-        principles = [f"Prefer {p['pattern']}" for p in eff[:3]] + [f"Avoid {p['pattern']}" for p in ineff[:2]]
-        if not principles:
-            principles = ["Evidence is still insufficient; keep exploring single-module changes."]
-        n = sum(len(v) for v in stats.values())
+                    "confidence": round(min(0.95, 0.4 + 0.15 * len(vals)), 2)}
+            (eff if mean > noise else ineff if mean < -noise else []).append(item)
+
+        updates, covered = [], set()
+        for p in ctx.previous_principles:
+            m = re.search(r"(\w+)=(\w+)", p.get("fields", {}).get("if", "") or p.get("principle", ""))
+            if not m:
+                continue
+            key = (m.group(1), m.group(2))
+            covered.add(key)
+            vals = new_stats.get(key)
+            if not vals:
+                continue
+            mean = sum(vals) / len(vals)
+            kind = "supports" if mean > noise else "contradicts" if mean < -noise else "neutral"
+            updates.append({"principle_id": p["id"], "evidence": kind,
+                            "strength": round(min(1.0, abs(mean) / (2 * noise) if noise else 1.0), 2),
+                            "trials": "new trials", "reason": f"mock: mean delta {mean:+.2f} for {key[0]}={key[1]}"})
+        new = [{"if": f"{p['pattern']}", "scope": "this backbone at the proxy schedule",
+                "then": "top-1 improves by more than the noise level", "because": "mock mechanism",
+                "disproved_if": "trials with this choice do not beat the baseline by more than the noise level"}
+               for p in eff if tuple(p["pattern"].split("=")) not in covered][:3]
+        n = sum(len(v) for v in all_stats.values())
         return {
-            "effective_patterns": eff,
-            "ineffective_patterns": ineff,
-            "synergies": [],
-            "design_principles": principles[:5],
+            "effective_patterns": eff, "ineffective_patterns": ineff, "synergies": [],
+            "principle_updates": updates, "new_principles": new,
             "next_search_direction": [f"Keep {p['pattern']} and vary another dimension" for p in eff[:2]],
             "data_sufficiency": "insufficient" if n < 4 else ("limited" if n < 12 else "adequate"),
         }

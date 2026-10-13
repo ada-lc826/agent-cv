@@ -4,8 +4,8 @@ Follows the NAS-Bench-201 script of the official repo (the variant matching Algo
 turn 1 encodes the problem, every later turn reports the last result and asks for a better model. No
 reflection, no memory structure beyond the conversation itself.
 
-Deviations: (1) the original sets temperature=0; Claude Opus 5.5 rejects `temperature`, so the default
-sampling is used. (2) The original script needs a human to type the proposed operation IDs; here the
+Deviations: (1) the original sets temperature=0; it is requested here and applied when the client can
+(DeepSeek with thinking disabled); otherwise default sampling is used and llm_calls.jsonl says so. (2) The original script needs a human to type the proposed operation IDs; here the
 answer is structured JSON. (3) The persona naming a real researcher is replaced by a generic expert.
 The conversation is rebuilt from memory each round (proposer_note keeps the rationale), so resume is
 exact and no controller state is needed.
@@ -45,7 +45,7 @@ class GeniusController(BaseController):
         tried = memory.tried_signatures()
         best = memory.best_trial() or memory.baseline
         arch, why, _ = ask_architecture(
-            self.client, "genius", GENIUS_SYSTEM, self._conversation(memory), self.task, tried,
+            self.client, "genius", GENIUS_SYSTEM, self._conversation(memory), self.task, tried, temperature=0.0,
             mock_fn=lambda att: mock_neighbour(best.architecture, self.task, tried, self.rng(round_, f"mock{att}")))
         if arch is None:
             return Proposal(self.random_untried(memory, round_), note="genius-fallback: random untried")

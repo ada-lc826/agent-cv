@@ -84,7 +84,9 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
         "gpu_hours": round(sum(t.duration_s for t in rows) / 3600, 3),
         "llm": _llm_usage(root),
         "n_reflections": len(mem.reflections),
-        "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: (-p.support_count, -p.confidence))],
+        "principle_status": dict(Counter(p.status for p in mem.principles)),
+        "n_trials_citing_principles": sum(1 for t in mem.trials if t.cited_principles),
+        "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: -p.confidence)],
         "failures": [asdict(x) for x in mem.failures],
     }
     with open(os.path.join(root, "search_summary.json"), "w", encoding="utf-8") as f:
