@@ -2,8 +2,8 @@
 # Usage: python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
 search:
   max_rounds: 10             # pilot budget; the formal classification comparison adds --max_rounds 30
-  min_improvement: 0.2       # >= proxy seed std; measure it first (see README) and update
-  noise_level: 0.2
+  min_improvement: 0.25      # = measured proxy seed std (60-epoch proxy, baseline seeds 0/1/2: 78.06/77.66/78.12)
+  noise_level: 0.25
   early_stop_patience: 0     # keep 0 in method comparisons
   max_consecutive_failures: 5
 
@@ -35,7 +35,8 @@ baselines:
 runner:
   mmpretrain_root: /root/mmpretrain          # checkout with tools/train.py and data/cifar100
   base_config: configs/resnet/resnet50_8xb16_cifar100.py
-  epochs: 30
+  epochs: 60                 # proxy check 2026-10-18: 30 epochs failed (proxy's best pick was 4th in full
+                             # training), 60 epochs passed (tau 0.68, best pick 1st); see runs/proxy_check
   warmup_epochs: 1
   batch_size: 128
   lr: 0.1
