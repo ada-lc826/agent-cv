@@ -219,18 +219,24 @@ class ArchitectureMemory:
         return next((p for p in self.principles if p.id == pid), None)
 
     def update_principle(self, pid: str, evidence: str, strength: float, round_: int,
-                         reason: str = "", trials: str = "") -> Optional[Principle]:
-        """Apply one piece of evidence. Returns None for an unknown id. Neutral evidence is logged only."""
+                         reason: str = "", trials: str = "", eta: Optional[float] = None,
+                         floor: float = 0.0) -> Optional[Principle]:
+        """Apply one piece of evidence. Returns None for an unknown id. Neutral evidence is logged only.
+        `eta` overrides the module-level ETA; `floor` is a minimum strength for supports / contradicts
+        (v2 reflection: weak non-neutral evidence still moves the confidence noticeably)."""
         p = self.principle(pid)
         if p is None or evidence not in ("supports", "contradicts", "neutral"):
             return None
         s = min(1.0, max(0.0, float(strength)))
+        if evidence != "neutral":
+            s = max(s, floor)
+        eta = ETA if eta is None else eta
         before = p.confidence
         if evidence == "supports":
-            p.confidence = before + ETA * s * (1.0 - before)
+            p.confidence = before + eta * s * (1.0 - before)
             p.support_count += 1
         elif evidence == "contradicts":
-            p.confidence = before - ETA * s * before
+            p.confidence = before - eta * s * before
             p.contradict_count += 1
         else:
             p.neutral_count += 1

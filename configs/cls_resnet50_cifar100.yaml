@@ -16,11 +16,16 @@ agent:
                              # the thinking control is a separate run: --thinking on
     use_fallbacks: true      # anthropic only: server-side refusal fallback
   search:
-    reflect_every_n: 2
+    reflect_every_n: 1       # v2: the Design Agent sees only the reflection, so reflect after every trial
     mutation_budget: 1
     stagnation_budget: 2
     stagnation_rounds: 3
     explore_every: 4
+    # reflection v2 (2026-10-20; --reflection_version v1 restores the pilot's settings)
+    design_view: reflection_only   # Design Agent: Reflector summary + tried list, no raw history
+    propose_hypotheses: true       # Reflector must propose 1-3 untested combinations (<= 2 dims from best)
+    confidence_eta: 0.35           # v1: 0.2
+    min_evidence_strength: 0.5     # floor for supports / contradicts strength; v1: none
 
 # Comparison methods, scaled to the 10-trial budget (see README "Comparison methods").
 baselines:

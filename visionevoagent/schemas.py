@@ -91,6 +91,33 @@ REFLECTION_SCHEMA: Dict[str, Any] = {
 }
 
 
+MAX_HYPOTHESES = 3
+
+
+def reflection_schema(task: str, with_hypotheses: bool = False) -> Dict[str, Any]:
+    """v1: REFLECTION_SCHEMA. v2 (with_hypotheses): the Reflector must also propose 1-3 untested
+    architectures ("untested_combinations") that test its principles or combine promising changes."""
+    if not with_hypotheses:
+        return REFLECTION_SCHEMA
+    space = get_search_space(task)
+    hyp = {
+        "type": "object",
+        "properties": {
+            "architecture": {"type": "object",
+                             "properties": {d: {"type": "string", "enum": space[d]} for d in DIMENSIONS},
+                             "required": list(DIMENSIONS), "additionalProperties": False},
+            "rationale": {"type": "string"},
+            "principle_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["architecture", "rationale", "principle_ids"],
+        "additionalProperties": False,
+    }
+    s = {**REFLECTION_SCHEMA, "properties": {**REFLECTION_SCHEMA["properties"],
+                                             "untested_combinations": {"type": "array", "items": hyp}},
+         "required": REFLECTION_SCHEMA["required"] + ["untested_combinations"]}
+    return s
+
+
 def _err(msg: str) -> Optional[str]:
     return msg
 
@@ -115,9 +142,18 @@ def validate_design(obj: Any, task: str) -> Optional[str]:
     return None
 
 
-def validate_reflection(obj: Any) -> Optional[str]:
+def validate_reflection(obj: Any, task: str = "", with_hypotheses: bool = False) -> Optional[str]:
     if not isinstance(obj, dict):
         return _err("response is not an object")
+    if with_hypotheses:
+        hyps = obj.get("untested_combinations")
+        if not isinstance(hyps, list) or not 1 <= len(hyps) <= MAX_HYPOTHESES:
+            return _err(f"untested_combinations must list 1-{MAX_HYPOTHESES} architectures")
+        space = get_search_space(task)
+        for h in hyps:
+            arch = h.get("architecture") if isinstance(h, dict) else None
+            if not isinstance(arch, dict) or any(arch.get(d) not in space[d] for d in DIMENSIONS):
+                return _err("every untested combination needs a valid architecture from SEARCH_SPACE")
     for key in ("effective_patterns", "ineffective_patterns"):
         items = obj.get(key)
         if not isinstance(items, list):

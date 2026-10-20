@@ -86,13 +86,14 @@ export PYTHONPATH=$PWD
    | D-2 no principle memory | `--no_principle_memory` |
    | D-3 no mutation budget | `--mutation_budget 4` |
    | D-4 no explore/exploit schedule | `--explore_every 0` |
-   | D-5 reflection frequency | `--reflect_every_n 1` / `2` / `4` |
+   | D-5 reflection frequency | `--reflect_every_n 1` (default) / `2` / `4` |
    | D-6 rule-based "reflection" (LLMENAS trigger: no improvement → change direction, improvement → refine) | `--reflection_style rule` |
    | D-7 immediate reflection without memory (RZ-NAS style) | `--reflection_style immediate` |
    | Design Agent without the cost table | `--no_param_costs` |
    | D-8 fixed principles: generic ones from the module papers (`configs/principles_fixed_cls.json`), never updated | `--principle_mode fixed` |
    | D-9 random principles in the same format, never updated | `--principle_mode random` |
    | D-10 principles induced as usual, confidence never updated | `--principle_mode no_update` |
+   | Pilot reflection (v1): Design Agent sees the full history, no untested combinations, eta 0.2, reflect every 2 rounds. Default v2: Design Agent sees only the Reflector summary + tried list, Reflector proposes 1-3 untested combinations (<= 2 dims from the best), eta 0.35 with strength floor 0.5, reflect every round | `--reflection_version v1` |
    | Principle transfer | `--init_principles runs/<other run>/principle_memory.json` (also works for `--mode lapt`) |
    | Transfer control: randomly initialised principles, updated as usual | `--init_principles random` |
    | Formal budget | `--max_rounds 30` |

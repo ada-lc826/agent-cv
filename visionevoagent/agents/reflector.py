@@ -9,9 +9,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..memory import render_principle
-from ..prompts import REFLECTOR_SYSTEM, build_reflection_prompt
-from ..schemas import REFLECTION_SCHEMA, validate_reflection
-from ..search_space import DIMENSIONS, get_search_space
+from ..prompts import REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, build_reflection_prompt
+from ..schemas import reflection_schema, validate_reflection
+from ..search_space import (DIMENSIONS, all_architectures, architecture_signature,
+                            count_architecture_difference, get_search_space)
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,9 @@ class ReflectionContext:
     failed: List[Dict[str, Any]]
     noise_level: float
     previous_principles: List[Dict[str, Any]]
+    # v2: also propose untested combinations (and judge evidence less conservatively)
+    propose_hypotheses: bool = False
+    tried: Optional[List[str]] = None
 
 
 class ReflectorAgent:
@@ -40,17 +44,20 @@ class ReflectorAgent:
         user = build_reflection_prompt(
             task=ctx.task, metric=ctx.metric, space=get_search_space(ctx.task), baseline=ctx.baseline,
             history=ctx.history, new_trials=ctx.new_trials, best=ctx.best, failed=ctx.failed,
-            noise_level=ctx.noise_level, previous_principles=ctx.previous_principles)
+            noise_level=ctx.noise_level, previous_principles=ctx.previous_principles,
+            tried=ctx.tried if ctx.propose_hypotheses else None)
+        system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
+        schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses)
         for attempt in range(1, self.max_attempts + 1):
             try:
-                out = self.client.complete_json("reflect", REFLECTOR_SYSTEM, user, REFLECTION_SCHEMA,
+                out = self.client.complete_json("reflect", system, user, schema,
                                                 mock_fn=lambda: self._mock(ctx))
             except AgentClientFatal:
                 raise
             except AgentClientError as e:
                 log.warning("reflector call failed (attempt %d): %s", attempt, e)
                 continue
-            reason = validate_reflection(out)
+            reason = validate_reflection(out, ctx.task, with_hypotheses=ctx.propose_hypotheses)
             if reason is None:
                 out["design_principles"] = [render_principle(p) for p in out["new_principles"]]
                 return out
@@ -104,9 +111,17 @@ class ReflectorAgent:
                 "disproved_if": "trials with this choice do not beat the baseline by more than the noise level"}
                for p in eff if tuple(p["pattern"].split("=")) not in covered][:3]
         n = sum(len(v) for v in all_stats.values())
-        return {
+        out = {
             "effective_patterns": eff, "ineffective_patterns": ineff, "synergies": [],
             "principle_updates": updates, "new_principles": new,
             "next_search_direction": [f"Keep {p['pattern']} and vary another dimension" for p in eff[:2]],
             "data_sufficiency": "insufficient" if n < 4 else ("limited" if n < 12 else "adequate"),
         }
+        if ctx.propose_hypotheses:  # untried architectures within 2 dimensions of the best
+            tried = set(ctx.tried or [])
+            cands = [a for a in all_architectures(ctx.task) if architecture_signature(a) not in tried
+                     and 1 <= count_architecture_difference(a, ctx.best["architecture"]) <= 2]
+            out["untested_combinations"] = [{"architecture": a, "rationale": "mock: untested nearby combination",
+                                             "principle_ids": []} for a in cands[:2]] or [
+                {"architecture": dict(ctx.best["architecture"]), "rationale": "mock: nothing left", "principle_ids": []}]
+        return out

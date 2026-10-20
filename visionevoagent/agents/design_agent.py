@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
-from ..prompts import DESIGN_REFLECTION_ADDENDUM, DESIGN_SYSTEM, build_design_prompt
+from ..prompts import (DESIGN_REFLECTION_ADDENDUM, DESIGN_REFLECTION_ONLY_ADDENDUM, DESIGN_SYSTEM,
+                       build_design_prompt)
 from ..schemas import MAX_PROPOSAL_ATTEMPTS, attempt_outcome, design_schema, validate_design
 from ..search_space import (DIMENSIONS, Architecture, architecture_signature, canonicalize,
                             count_architecture_difference, get_search_space, random_local_mutation)
@@ -30,6 +31,12 @@ class DesignContext:
     reflection_context: Optional[Dict[str, Any]]  # None when reflection is disabled
     round: int
     candidate_costs: Optional[List[Dict[str, Any]]] = None  # [{"architecture", "params"}]; None = no cost table
+    # v2 reflection: the raw history is hidden (REFLECTION_CONTEXT is the only account of the search) and
+    # the Reflector's untested combinations are offered; those may differ from the best in 2 dimensions
+    show_history: bool = True
+    hypotheses: Optional[List[Dict[str, Any]]] = None       # [{"architecture", "rationale", "principle_ids"}]
+
+HYPOTHESIS_BUDGET = 2
 
 
 class DesignAgent:
@@ -45,7 +52,9 @@ class DesignAgent:
         of every attempt is appended to `record` (ok | duplicate | invalid | call_error)."""
         record = record if record is not None else []
         space = get_search_space(ctx.task)
-        system = DESIGN_SYSTEM + (DESIGN_REFLECTION_ADDENDUM if ctx.reflection_context is not None else "")
+        system = (DESIGN_SYSTEM + (DESIGN_REFLECTION_ADDENDUM if ctx.reflection_context is not None else "")
+                  + ("" if ctx.show_history else DESIGN_REFLECTION_ONLY_ADDENDUM))
+        hyp_sigs = {architecture_signature(h["architecture"]) for h in (ctx.hypotheses or [])}
         known_ids = {p.get("id") for p in (ctx.reflection_context or {}).get("design_principles", [])
                      if isinstance(p, dict) and p.get("id")}
         schema = design_schema(ctx.task, with_citations=bool(known_ids))
@@ -56,7 +65,8 @@ class DesignAgent:
                 history=ctx.history, best=ctx.best, failed=sorted(ctx.failed),
                 search_mode=ctx.search_mode, mutation_budget=ctx.mutation_budget,
                 noise_level=ctx.noise_level, reflection_context=ctx.reflection_context,
-                candidate_costs=ctx.candidate_costs, feedback=feedback)
+                candidate_costs=ctx.candidate_costs, feedback=feedback, show_history=ctx.show_history,
+                tried=sorted(ctx.tried), hypotheses=ctx.hypotheses)
             try:
                 out = self.client.complete_json("design", system, user, schema,
                                                 mock_fn=lambda: self._mock(ctx, attempt))
@@ -70,11 +80,12 @@ class DesignAgent:
             reason = validate_design(out, ctx.task)
             if reason is None:
                 arch = canonicalize(out["architecture"])
-                reason = self._check_rules(arch, ctx)
+                reason = self._check_rules(arch, ctx, hyp_sigs)
             record.append(attempt_outcome(reason))
             if reason is None:
                 cited = [c for c in dict.fromkeys(out.get("cited_principles", [])) if c in known_ids]
-                return arch, f"llm: {out['rationale']}", cited
+                tag = "llm[hypothesis]" if architecture_signature(arch) in hyp_sigs else "llm"
+                return arch, f"{tag}: {out['rationale']}", cited
             log.info("design rejected (attempt %d): %s", attempt, reason)
             feedback = reason
         arch, note = self._fallback(ctx)
@@ -82,14 +93,15 @@ class DesignAgent:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _check_rules(arch: Architecture, ctx: DesignContext) -> Optional[str]:
+    def _check_rules(arch: Architecture, ctx: DesignContext, hyp_sigs: Optional[set] = None) -> Optional[str]:
         sig = architecture_signature(arch)
         if sig in ctx.failed:
             return f"{sig} is a known failed configuration"
         if sig in ctx.tried:
             return f"{sig} was already evaluated"
+        budget = max(ctx.mutation_budget, HYPOTHESIS_BUDGET) if sig in (hyp_sigs or set()) else ctx.mutation_budget
         diff = count_architecture_difference(arch, ctx.best["architecture"])
-        if diff > ctx.mutation_budget:
+        if diff > budget:
             return f"changes {diff} dimensions vs the current best, exceeding MUTATION_BUDGET={ctx.mutation_budget}"
         return None
 
@@ -106,6 +118,10 @@ class DesignAgent:
     def _mock(self, ctx: DesignContext, attempt: int) -> Dict[str, Any]:
         """Deterministic stand-in for the LLM (dry runs only): greedy on per-value mean delta."""
         rng = random.Random(f"{self.seed}-mock-{ctx.round}-{attempt}")
+        if ctx.hypotheses and ctx.search_mode == "exploit":  # v2: test the Reflector's first hypothesis
+            h = ctx.hypotheses[0]
+            return {"architecture": h["architecture"], "rationale": "mock: test the reflector's hypothesis",
+                    "cited_principles": list(h.get("principle_ids", []))}
         space = get_search_space(ctx.task)
         stats: Dict[Tuple[str, str], List[float]] = {}
         for r in ctx.history:

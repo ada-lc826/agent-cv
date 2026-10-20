@@ -56,6 +56,8 @@ def _proposal_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
         "duplicate_rate": round(dup / len(answers), 3) if answers else None,
         "n_rounds_reasked": sum(1 for t in mem.trials if len(t.proposal_attempts) > 1),
         "fallback_rate": round(fallback / n, 3) if n else None,
+        # reflection v2: rounds that tested one of the Reflector's untested combinations
+        "n_hypothesis_rounds": sum(1 for t in mem.trials if t.proposer_note.startswith("llm[hypothesis]")),
     }
 
 

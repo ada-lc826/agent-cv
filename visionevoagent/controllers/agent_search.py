@@ -5,7 +5,7 @@ use_reflection=True  -> + innovation 2 (Reflective Architecture Evolution).
 Sub-switches support the ablations of the research plan:
   D-1 use_failure_memory=False      D-2 use_principle_memory=False
   D-3 mutation_budget = 4           D-4 explore_every=0
-  D-5 reflect_every_n in {1, 2, 4}
+  D-5 reflect_every_n in {1, 2, 4} (default 1)
   D-6 reflection_style="rule"       LLMENAS-style trigger: "best did not improve -> change direction,
                                     improved -> refine", no LLM reflection, no principles
   D-7 reflection_style="immediate"  RZ-NAS-style: reflect on the last trial only, every round,
@@ -16,6 +16,14 @@ Controls for "do the principles matter, and does online updating matter" (adviso
                               never updated, no new principles
   principle_mode="random"     randomly generated principles in the same format, never updated
   principle_mode="no_update"  principles are induced as usual but their confidence never moves
+Reflection v2 (2026-10-20, after the pilot showed Agent and Agent+Reflector making the same choices;
+full style only):
+  design_view="reflection_only"  the Design Agent sees the Reflector's summary instead of the raw history
+                                 (only a "do not repeat" list of tried signatures)
+  propose_hypotheses=True        the Reflector must propose 1-3 untested combinations (up to 2 dimensions
+                                 from the best); the Design Agent may take them beyond MUTATION_BUDGET
+  confidence_eta / min_evidence_strength   larger step and a strength floor for non-neutral evidence
+v1 = full_history, no hypotheses, eta 0.2, no floor (run_search.py --reflection_version v1).
 """
 from __future__ import annotations
 
@@ -24,14 +32,16 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from ..agents import DesignAgent, DesignContext, ReflectionContext, ReflectorAgent
+from ..agents.design_agent import HYPOTHESIS_BUDGET
 from ..memory import ArchitectureMemory
-from ..search_space import architecture_signature, local_mutations
+from ..search_space import architecture_signature, canonicalize, count_architecture_difference, local_mutations
 from .base import BaseController, Proposal
 
 log = logging.getLogger(__name__)
 
 REFLECTION_STYLES = ("full", "rule", "immediate")
 PRINCIPLE_MODES = ("online", "fixed", "random", "no_update")
+DESIGN_VIEWS = ("full_history", "reflection_only")
 
 
 @dataclass
@@ -40,7 +50,7 @@ class AgentSearchConfig:
     use_failure_memory: bool = True
     use_principle_memory: bool = True
     reflection_style: str = "full"      # full | rule (D-6) | immediate (D-7)
-    reflect_every_n: int = 2
+    reflect_every_n: int = 1            # v2: the Design Agent sees only the reflection (v1: 2)
     mutation_budget: int = 1
     stagnation_budget: int = 2          # budget used after `stagnation_rounds` rounds without a new best
     stagnation_rounds: int = 3
@@ -48,6 +58,11 @@ class AgentSearchConfig:
     max_principles_in_prompt: int = 8
     show_param_costs: bool = True       # per-candidate parameter-cost table in the design prompt
     principle_mode: str = "online"      # online | fixed | random | no_update (see module docstring)
+    # reflection v2 (see module docstring); v1 = full_history, False, None (memory.ETA = 0.2), 0.0
+    design_view: str = "reflection_only"     # full_history | reflection_only
+    propose_hypotheses: bool = True
+    confidence_eta: Optional[float] = 0.35
+    min_evidence_strength: float = 0.5
 
 
 def trial_rows(memory: ArchitectureMemory) -> List[Dict[str, Any]]:
@@ -75,6 +90,8 @@ class AgentSearchController(BaseController):
             raise ValueError(f"reflection_style must be one of {REFLECTION_STYLES}")
         if cfg.principle_mode not in PRINCIPLE_MODES:
             raise ValueError(f"principle_mode must be one of {PRINCIPLE_MODES}")
+        if cfg.design_view not in DESIGN_VIEWS:
+            raise ValueError(f"design_view must be one of {DESIGN_VIEWS}")
         self.design = design
         self.reflector = reflector
         self.cfg = cfg
@@ -130,6 +147,32 @@ class AgentSearchController(BaseController):
             ctx["design_principles"] = ref.get("design_principles", [])
         return ctx
 
+    def _v2(self) -> bool:
+        return self.cfg.use_reflection and self.cfg.reflection_style == "full"
+
+    def _show_history(self) -> bool:
+        return not (self._v2() and self.cfg.design_view == "reflection_only")
+
+    def _hypotheses(self, memory: ArchitectureMemory, best_arch, excluded: set) -> Optional[List[Dict[str, Any]]]:
+        """Untested combinations from the latest reflection that are still untried and within
+        HYPOTHESIS_BUDGET of the current best (canonicalized, deduplicated)."""
+        if not (self._v2() and self.cfg.propose_hypotheses):
+            return None
+        out, seen = [], set()
+        for h in (memory.latest_reflection() or {}).get("untested_combinations", []):
+            try:
+                arch = canonicalize(h["architecture"])
+            except Exception:  # noqa: BLE001 - malformed hypothesis, skip it
+                continue
+            sig = architecture_signature(arch)
+            diff = count_architecture_difference(arch, best_arch)
+            if sig in excluded or sig in seen or not 1 <= diff <= max(self.cfg.mutation_budget, HYPOTHESIS_BUDGET):
+                continue
+            seen.add(sig)
+            out.append({"architecture": arch, "rationale": h.get("rationale", ""),
+                        "principle_ids": list(h.get("principle_ids", []))})
+        return out
+
     def _uses_principle_memory(self) -> bool:
         """Principles from memory are shown to the Design Agent (all principle modes)."""
         return self.cfg.reflection_style == "full" and self.cfg.use_principle_memory
@@ -143,14 +186,15 @@ class AgentSearchController(BaseController):
         failed = memory.failed_signatures() if self.cfg.use_failure_memory else set()
         best = best_info(memory)
         budget = self._mutation_budget(memory, round_)
+        excluded = memory.tried_signatures() | failed
         ctx = DesignContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best, history=trial_rows(memory),
             tried=memory.tried_signatures(), failed=failed, search_mode=mode,
             mutation_budget=budget, noise_level=self.noise_level,
             reflection_context=self._reflection_context(memory), round=round_,
-            candidate_costs=self._candidate_costs(memory, best["architecture"], budget,
-                                                  memory.tried_signatures() | failed))
+            candidate_costs=self._candidate_costs(memory, best["architecture"], budget, excluded),
+            show_history=self._show_history(), hypotheses=self._hypotheses(memory, best["architecture"], excluded))
         arch, note, cited_ids = self.design.propose(ctx, record=self.proposal_attempts)
         cited = []
         for pid in cited_ids:  # snapshot the confidence the Design Agent saw (calibration analysis)
@@ -183,7 +227,9 @@ class AgentSearchController(BaseController):
             best=best_info(memory), history=history[-1:] if immediate else history, new_trials=new_trials,
             failed=[] if immediate or not self.cfg.use_failure_memory else [asdict(f) for f in memory.failures],
             noise_level=self.noise_level,
-            previous_principles=[asdict(p) for p in memory.active_principles()] if keep else [])
+            previous_principles=[asdict(p) for p in memory.active_principles()] if keep else [],
+            propose_hypotheses=self._v2() and self.cfg.propose_hypotheses,
+            tried=sorted(memory.tried_signatures()))
         ref = self.reflector.reflect(ctx)
         if ref is None:
             log.warning("round %d: reflection failed, keeping previous knowledge", round_)
@@ -207,7 +253,8 @@ class AgentSearchController(BaseController):
                 ignored.append(pid)
                 continue
             p = memory.update_principle(pid, u["evidence"], u["strength"], round_,
-                                        reason=u.get("reason", ""), trials=u.get("trials", ""))
+                                        reason=u.get("reason", ""), trials=u.get("trials", ""),
+                                        eta=self.cfg.confidence_eta, floor=self.cfg.min_evidence_strength)
             (updated if p is not None else ignored).append(pid)
         added = [memory.add_principle(f, self.task, round_, already_updated=set(updated)).id
                  for f in ref["new_principles"]]

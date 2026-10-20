@@ -26,6 +26,26 @@ not shown). Prefer designs consistent with confirmed principles; an uncertain pr
 when the round is an exploration round. Avoid patterns marked ineffective. List in cited_principles the \
 ids of the principles your proposal relies on (empty if none) and name them in the rationale."""
 
+DESIGN_REFLECTION_ONLY_ADDENDUM = """
+You do NOT see the raw experiment history. REFLECTION_CONTEXT, written by the Reflector after every \
+round, is your only account of what has been learned; TRIED ARCHITECTURES only tells you what not to \
+repeat. HYPOTHESES_TO_TEST are untested architectures the Reflector proposed to test its principles or \
+to combine changes that looked promising separately. In an exploit round, propose one of them unless \
+it is clearly worse than the alternatives; in an explore round you may test one or try something new. \
+A hypothesis may differ from the current best in up to 2 dimensions even when MUTATION_BUDGET is 1."""
+
+REFLECTOR_HYPOTHESES_ADDENDUM = """
+Additional duties (required):
+6. UNTESTED COMBINATIONS: propose 1-3 architectures that do NOT appear in TRIED ARCHITECTURES and that \
+would test your principles most sharply or combine changes that each looked promising but were never \
+tried together (e.g. two single-dimension changes that each helped). Each may differ from the CURRENT \
+BEST in at most 2 dimensions. Give the ids of the principles each one tests and a one-sentence rationale.
+Evidence (stricter about not wasting information):
+- A new trial counts as evidence for every principle whose IF-condition it touches, even when the \
+comparison is not perfectly controlled: compare it with the closest earlier trial and lower the \
+strength for confounding instead of calling it neutral. Use neutral only when the new trials do not \
+touch the principle or the difference is within NOISE_LEVEL."""
+
 REFLECTOR_SYSTEM = """You are the Neural Architecture Reflection Agent of VisionEvoAgent.
 From the experiment history of a module-insertion search on a vision model, maintain a body of \
 falsifiable design knowledge:
@@ -102,13 +122,20 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                         search_mode: str, mutation_budget: int, noise_level: float,
                         reflection_context: Optional[Dict[str, Any]],
                         candidate_costs: Optional[List[Dict[str, Any]]] = None,
-                        feedback: str = "") -> str:
+                        feedback: str = "", show_history: bool = True,
+                        tried: Optional[List[str]] = None,
+                        hypotheses: Optional[List[Dict[str, Any]]] = None) -> str:
+    if show_history:
+        hist = f"HISTORY:\n{_fmt_history(history)}"
+    else:  # v2: the Reflector's summary replaces the raw history; only the "do not repeat" list remains
+        hist = ("TRIED ARCHITECTURES (attention__conv__fusion__target_stage; do not repeat): "
+                + (", ".join(sorted(tried or [])) or "none"))
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
         f"SEARCH_SPACE:\n{_fmt_space(space)}",
         f"BASELINE: {json.dumps(baseline['architecture'])} score={baseline['score']:.2f} params={baseline['params']:.2f}M",
         f"CURRENT BEST: {json.dumps(best['architecture'])} score={best['score']:.2f}",
-        f"HISTORY:\n{_fmt_history(history)}",
+        hist,
         f"FAILED ARCHITECTURES (do not repeat): {failed if failed else 'none'}",
         f"SEARCH_MODE: {search_mode}",
         f"MUTATION_BUDGET: {mutation_budget}",
@@ -121,6 +148,9 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                      + _fmt_costs(candidate_costs, baseline["params"]))
     if reflection_context is not None:
         parts.append(f"REFLECTION_CONTEXT:\n{json.dumps(reflection_context, indent=2, ensure_ascii=False)}")
+    if hypotheses:
+        parts.append("HYPOTHESES_TO_TEST (untested; proposed by the Reflector):\n"
+                     + json.dumps(hypotheses, indent=2, ensure_ascii=False))
     if feedback:
         parts.append(f"YOUR PREVIOUS ANSWER WAS REJECTED: {feedback}\nPropose a different candidate.")
     parts.append("Propose the next candidate architecture and explain why in one or two sentences.")
@@ -141,7 +171,8 @@ def principle_view(p: Dict[str, Any]) -> Dict[str, Any]:
 def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str]], baseline: Dict[str, Any],
                             history: List[Dict[str, Any]], new_trials: List[Dict[str, Any]], best: Dict[str, Any],
                             failed: List[Dict[str, Any]], noise_level: float,
-                            previous_principles: List[Dict[str, Any]]) -> str:
+                            previous_principles: List[Dict[str, Any]],
+                            tried: Optional[List[str]] = None) -> str:
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
         f"SEARCH_SPACE:\n{_fmt_space(space)}",
@@ -154,6 +185,9 @@ def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str
         "EXISTING PRINCIPLES (report evidence for them by id; do not restate them as new):\n"
         + (json.dumps([principle_view(p) for p in previous_principles], indent=2, ensure_ascii=False)
            if previous_principles else "none"),
-        "Produce the reflection.",
     ]
+    if tried is not None:
+        parts.append("TRIED ARCHITECTURES (attention__conv__fusion__target_stage; untested combinations must "
+                     "not be among these): " + (", ".join(sorted(tried)) or "none"))
+    parts.append("Produce the reflection.")
     return "\n\n".join(parts)
