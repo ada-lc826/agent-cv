@@ -34,6 +34,13 @@ to combine changes that looked promising separately. In an exploit round, propos
 it is clearly worse than the alternatives; in an explore round you may test one or try something new. \
 A hypothesis may differ from the current best in up to 2 dimensions even when MUTATION_BUDGET is 1."""
 
+DESIGN_COMPUTED_ADDENDUM = """
+Principle confidence is NOT an opinion: the system computes it from all trials with a statistical model \
+that knows NOISE_LEVEL (posterior probability that the principle's claim holds). EVIDENCE_TABLE gives the \
+model's effect estimates (+- sd). Each hypothesis lists the Reflector's predicted delta vs the baseline and \
+the model's prediction (+- sd). In an exploit round prefer a hypothesis with a high predicted gain; in an \
+explore round prefer one that tests a principle whose confidence is near 0.5 (most informative)."""
+
 REFLECTOR_HYPOTHESES_ADDENDUM = """
 Additional duties (required):
 6. UNTESTED COMBINATIONS: propose 1-3 architectures that do NOT appear in TRIED ARCHITECTURES and that \
@@ -45,6 +52,46 @@ Evidence (stricter about not wasting information):
 comparison is not perfectly controlled: compare it with the closest earlier trial and lower the \
 strength for confounding instead of calling it neutral. Use neutral only when the new trials do not \
 touch the principle or the difference is within NOISE_LEVEL."""
+
+REFLECTOR_SYSTEM_V3 = """You are the Neural Architecture Reflection Agent of VisionEvoAgent.
+From the experiment history of a module-insertion search on a vision model, you conjecture falsifiable \
+design knowledge; the experiments decide whether it holds.
+1. Effective and ineffective patterns (modules that help, hurt, or are not worth their parameter cost).
+2. Synergies or conflicts between modules.
+3. At most 3 NEW principles, only when the data suggest something the existing ones do not cover.
+4. Concrete directions for the next rounds.
+You do NOT judge evidence. The system computes every principle's confidence from all trials with a \
+Bayesian linear model (main effect per module choice + the interactions your claims name, known seed \
+noise NOISE_LEVEL): the posterior probability that the claim holds. You see the result in \
+EVIDENCE_TABLE and in each existing principle's confidence and effect estimate. Use it: do not restate \
+a principle the data already decide; propose principles about what is still uncertain or untested, \
+in particular interactions (two choices that may help or hurt together more than separately).
+Every new principle must pass all of:
+- Mechanistic: says WHY (a causal mechanism), not just which configuration scored well.
+- Scoped: states where it applies (stages, module family, model / task).
+- Predictive: states the expected direction and rough size of the effect on the metric or parameters.
+- Falsifiable: states what result would disprove it.
+- Novel: not a restatement of an existing principle.
+- Testable: can be checked by changing one or two dimensions of SEARCH_SPACE.
+- Transferable: no round numbers or one-off scores in the statement itself.
+Write it as fields: if (the architectural choice), scope, then (predicted effect), because (mechanism), \
+disproved_if (falsification criterion), and a machine-checkable claim:
+  condition: 1-2 {dim, value} terms (the choice; 2 terms = a joint choice / interaction),
+  reference: what it is compared with, {dim, value} terms on the same dims ([] = the baseline values \
+of those dims, e.g. attention=none),
+  direction: increase | decrease (of the primary metric),
+  min_effect: the size of the claimed effect in metric points (use NOISE_LEVEL unless you claim more).
+Example: "eca together with weighted fusion" -> claim {condition: [{dim: attention, value: eca}, \
+{dim: fusion, value: weighted}], reference: [], direction: increase, min_effect: 0.5}.
+5. UNTESTED COMBINATIONS: propose 1-3 architectures that do NOT appear in TRIED ARCHITECTURES and that \
+would test the most uncertain or most promising principles, or combine changes that each looked \
+promising but were never tried together. Each may differ from the CURRENT BEST in at most 2 \
+dimensions. Give the ids of the principles each one tests, a one-sentence rationale and \
+predicted_delta: your prediction of its score minus the BASELINE score (it will be checked).
+General rules:
+- Only mention modules that exist in SEARCH_SPACE; never invent new architectures.
+- With few or noisy trials, set data_sufficiency accordingly.
+Return JSON only."""
 
 REFLECTOR_SYSTEM = """You are the Neural Architecture Reflection Agent of VisionEvoAgent.
 From the experiment history of a module-insertion search on a vision model, maintain a body of \
@@ -124,7 +171,8 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                         candidate_costs: Optional[List[Dict[str, Any]]] = None,
                         feedback: str = "", show_history: bool = True,
                         tried: Optional[List[str]] = None,
-                        hypotheses: Optional[List[Dict[str, Any]]] = None) -> str:
+                        hypotheses: Optional[List[Dict[str, Any]]] = None,
+                        evidence_table: Optional[List[Dict[str, Any]]] = None) -> str:
     if show_history:
         hist = f"HISTORY:\n{_fmt_history(history)}"
     else:  # v2: the Reflector's summary replaces the raw history; only the "do not repeat" list remains
@@ -148,6 +196,9 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                      + _fmt_costs(candidate_costs, baseline["params"]))
     if reflection_context is not None:
         parts.append(f"REFLECTION_CONTEXT:\n{json.dumps(reflection_context, indent=2, ensure_ascii=False)}")
+    if evidence_table:
+        parts.append("EVIDENCE_TABLE (computed from all trials; estimate +- sd in metric points):\n"
+                     + _fmt_evidence(evidence_table))
     if hypotheses:
         parts.append("HYPOTHESES_TO_TEST (untested; proposed by the Reflector):\n"
                      + json.dumps(hypotheses, indent=2, ensure_ascii=False))
@@ -155,6 +206,11 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
         parts.append(f"YOUR PREVIOUS ANSWER WAS REJECTED: {feedback}\nPropose a different candidate.")
     parts.append("Propose the next candidate architecture and explain why in one or two sentences.")
     return "\n\n".join(parts)
+
+
+def _fmt_evidence(rows: List[Dict[str, Any]]) -> str:
+    return "\n".join(f"- {r['term']} ({r['kind']}): {r['estimate']:+.2f} +- {r['sd']:.2f}, "
+                     f"in {r['n_trials_with_it']} scored trials" for r in rows)
 
 
 def principle_view(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -165,6 +221,15 @@ def principle_view(p: Dict[str, Any]) -> Dict[str, Any]:
             "updated_in_rounds": sorted({e["round"] for e in p.get("evidence", [])})}
     if p.get("transferred_from"):  # learned in another task; its earlier rounds belong to that task
         view["transferred_from"] = p["transferred_from"]
+    if p.get("claim"):  # v3: confidence computed from the trials
+        from .evidence import claim_text
+        view["claim"] = claim_text(p["claim"])
+        st = p.get("stats") or {}
+        if st:
+            view["effect_estimate"] = f"{st['effect_mean']:+.2f} +- {st['effect_sd']:.2f}"
+            view["direct_trials"] = st.get("n_direct", 0)
+        for k in ("supports", "contradicts"):
+            view.pop(k, None)
     return view
 
 
@@ -172,7 +237,13 @@ def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str
                             history: List[Dict[str, Any]], new_trials: List[Dict[str, Any]], best: Dict[str, Any],
                             failed: List[Dict[str, Any]], noise_level: float,
                             previous_principles: List[Dict[str, Any]],
-                            tried: Optional[List[str]] = None) -> str:
+                            tried: Optional[List[str]] = None,
+                            evidence_table: Optional[List[Dict[str, Any]]] = None) -> str:
+    computed = evidence_table is not None  # v3: the system, not the Reflector, scores the principles
+    new_hdr = ("NEW TRIALS SINCE THE LAST REFLECTION" if computed
+               else "NEW TRIALS SINCE THE LAST REFLECTION (the only admissible new evidence)")
+    prin_hdr = ("EXISTING PRINCIPLES (confidence computed from the trials; do not restate them as new)" if computed
+                else "EXISTING PRINCIPLES (report evidence for them by id; do not restate them as new)")
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
         f"SEARCH_SPACE:\n{_fmt_space(space)}",
@@ -180,12 +251,15 @@ def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str
         f"CURRENT BEST: {json.dumps(best['architecture'])} score={best['score']:.2f} params={best.get('params', 0):.2f}M",
         f"NOISE_LEVEL: {noise_level:.2f} {metric} points (single-run seed noise of the proxy training)",
         f"FULL HISTORY (context):\n{_fmt_history(history)}",
-        f"NEW TRIALS SINCE THE LAST REFLECTION (the only admissible new evidence):\n{_fmt_history(new_trials)}",
+        f"{new_hdr}:\n{_fmt_history(new_trials)}",
         f"FAILED CONFIGURATIONS: {json.dumps(failed) if failed else 'none'}",
-        "EXISTING PRINCIPLES (report evidence for them by id; do not restate them as new):\n"
+        f"{prin_hdr}:\n"
         + (json.dumps([principle_view(p) for p in previous_principles], indent=2, ensure_ascii=False)
            if previous_principles else "none"),
     ]
+    if evidence_table is not None:
+        parts.append("EVIDENCE_TABLE (Bayesian linear model over all scored trials, baseline included; "
+                     "estimate +- sd in metric points):\n" + (_fmt_evidence(evidence_table) or "none"))
     if tried is not None:
         parts.append("TRIED ARCHITECTURES (attention__conv__fusion__target_stage; untested combinations must "
                      "not be among these): " + (", ".join(sorted(tried)) or "none"))

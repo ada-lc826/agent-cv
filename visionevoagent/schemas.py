@@ -94,28 +94,53 @@ REFLECTION_SCHEMA: Dict[str, Any] = {
 MAX_HYPOTHESES = 3
 
 
-def reflection_schema(task: str, with_hypotheses: bool = False) -> Dict[str, Any]:
+def _claim_schema(task: str) -> Dict[str, Any]:
+    space = get_search_space(task)
+    term = {"type": "object",
+            "properties": {"dim": {"type": "string", "enum": list(DIMENSIONS)},
+                           "value": {"type": "string", "enum": sorted({v for d in DIMENSIONS for v in space[d]})}},
+            "required": ["dim", "value"], "additionalProperties": False}
+    return {"type": "object",
+            "properties": {"condition": {"type": "array", "items": term},
+                           "reference": {"type": "array", "items": term},
+                           "direction": {"type": "string", "enum": ["increase", "decrease"]},
+                           "min_effect": {"type": "number"}},
+            "required": ["condition", "reference", "direction", "min_effect"], "additionalProperties": False}
+
+
+def reflection_schema(task: str, with_hypotheses: bool = False, computed_evidence: bool = False) -> Dict[str, Any]:
     """v1: REFLECTION_SCHEMA. v2 (with_hypotheses): the Reflector must also propose 1-3 untested
-    architectures ("untested_combinations") that test its principles or combine promising changes."""
-    if not with_hypotheses:
+    architectures ("untested_combinations") that test its principles or combine promising changes.
+    v3 (computed_evidence): no principle_updates (the system computes confidence from the trials); every
+    new principle carries a machine-checkable `claim`; every hypothesis a `predicted_delta`."""
+    if not with_hypotheses and not computed_evidence:
         return REFLECTION_SCHEMA
     space = get_search_space(task)
-    hyp = {
-        "type": "object",
-        "properties": {
+    props = dict(REFLECTION_SCHEMA["properties"])
+    required = list(REFLECTION_SCHEMA["required"])
+    if with_hypotheses:
+        hyp_props: Dict[str, Any] = {
             "architecture": {"type": "object",
                              "properties": {d: {"type": "string", "enum": space[d]} for d in DIMENSIONS},
                              "required": list(DIMENSIONS), "additionalProperties": False},
             "rationale": {"type": "string"},
             "principle_ids": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["architecture", "rationale", "principle_ids"],
-        "additionalProperties": False,
-    }
-    s = {**REFLECTION_SCHEMA, "properties": {**REFLECTION_SCHEMA["properties"],
-                                             "untested_combinations": {"type": "array", "items": hyp}},
-         "required": REFLECTION_SCHEMA["required"] + ["untested_combinations"]}
-    return s
+        }
+        hyp_req = ["architecture", "rationale", "principle_ids"]
+        if computed_evidence:
+            hyp_props["predicted_delta"] = {"type": "number"}   # predicted score delta vs the baseline
+            hyp_req.append("predicted_delta")
+        props["untested_combinations"] = {"type": "array", "items": {
+            "type": "object", "properties": hyp_props, "required": hyp_req, "additionalProperties": False}}
+        required.append("untested_combinations")
+    if computed_evidence:
+        props.pop("principle_updates")
+        required.remove("principle_updates")
+        props["new_principles"] = {"type": "array", "items": {
+            "type": "object",
+            "properties": {**_NEW_PRINCIPLE["properties"], "claim": _claim_schema(task)},
+            "required": list(PRINCIPLE_FIELDS) + ["claim"], "additionalProperties": False}}
+    return {**REFLECTION_SCHEMA, "properties": props, "required": required}
 
 
 def _err(msg: str) -> Optional[str]:
@@ -142,9 +167,26 @@ def validate_design(obj: Any, task: str) -> Optional[str]:
     return None
 
 
-def validate_reflection(obj: Any, task: str = "", with_hypotheses: bool = False) -> Optional[str]:
+def validate_reflection(obj: Any, task: str = "", with_hypotheses: bool = False,
+                        computed_evidence: bool = False) -> Optional[str]:
     if not isinstance(obj, dict):
         return _err("response is not an object")
+    if computed_evidence:  # v3: evidence is computed by the system; the field is not asked for
+        obj.setdefault("principle_updates", [])
+        from .evidence import validate_claim
+        # a principle whose claim cannot be checked is dropped (and recorded), not the whole reflection
+        keep, dropped = [], []
+        for p in obj.get("new_principles") or []:
+            bad = validate_claim(p.get("claim") if isinstance(p, dict) else None, task)
+            (dropped if bad else keep).append({"principle": p, "reason": bad} if bad else p)
+        if isinstance(obj.get("new_principles"), list):
+            obj["new_principles"] = keep
+            if dropped:
+                obj["dropped_principles"] = dropped
+        if with_hypotheses:
+            for h in obj.get("untested_combinations") or []:
+                if not isinstance(h, dict) or not isinstance(h.get("predicted_delta"), (int, float)):
+                    return _err("every untested combination needs a numeric predicted_delta")
     if with_hypotheses:
         hyps = obj.get("untested_combinations")
         if not isinstance(hyps, list) or not 1 <= len(hyps) <= MAX_HYPOTHESES:

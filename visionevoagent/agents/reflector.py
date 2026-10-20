@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..memory import render_principle
-from ..prompts import REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, build_reflection_prompt
+from ..prompts import (REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, REFLECTOR_SYSTEM_V3,
+                       build_reflection_prompt)
 from ..schemas import reflection_schema, validate_reflection
 from ..search_space import (DIMENSIONS, all_architectures, architecture_signature,
                             count_architecture_difference, get_search_space)
@@ -31,6 +32,11 @@ class ReflectionContext:
     # v2: also propose untested combinations (and judge evidence less conservatively)
     propose_hypotheses: bool = False
     tried: Optional[List[str]] = None
+    # v3: confidence is computed by the system (evidence.py); the Reflector sees the evidence table and
+    # writes machine-checkable claims and predicted deltas instead of judging evidence
+    computed_evidence: bool = False
+    evidence_table: Optional[List[Dict[str, Any]]] = None
+    model: Any = None                         # evidence.EvidenceModel (used by the dry-run mock only)
 
 
 class ReflectorAgent:
@@ -45,9 +51,14 @@ class ReflectorAgent:
             task=ctx.task, metric=ctx.metric, space=get_search_space(ctx.task), baseline=ctx.baseline,
             history=ctx.history, new_trials=ctx.new_trials, best=ctx.best, failed=ctx.failed,
             noise_level=ctx.noise_level, previous_principles=ctx.previous_principles,
-            tried=ctx.tried if ctx.propose_hypotheses else None)
-        system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
-        schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses)
+            tried=ctx.tried if ctx.propose_hypotheses else None,
+            evidence_table=(ctx.evidence_table or []) if ctx.computed_evidence else None)
+        if ctx.computed_evidence:
+            system = REFLECTOR_SYSTEM_V3
+        else:
+            system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
+        schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses,
+                                   computed_evidence=ctx.computed_evidence)
         for attempt in range(1, self.max_attempts + 1):
             try:
                 out = self.client.complete_json("reflect", system, user, schema,
@@ -57,7 +68,8 @@ class ReflectorAgent:
             except AgentClientError as e:
                 log.warning("reflector call failed (attempt %d): %s", attempt, e)
                 continue
-            reason = validate_reflection(out, ctx.task, with_hypotheses=ctx.propose_hypotheses)
+            reason = validate_reflection(out, ctx.task, with_hypotheses=ctx.propose_hypotheses,
+                                         computed_evidence=ctx.computed_evidence)
             if reason is None:
                 out["design_principles"] = [render_principle(p) for p in out["new_principles"]]
                 return out
@@ -117,11 +129,34 @@ class ReflectorAgent:
             "next_search_direction": [f"Keep {p['pattern']} and vary another dimension" for p in eff[:2]],
             "data_sufficiency": "insufficient" if n < 4 else ("limited" if n < 12 else "adequate"),
         }
+        if ctx.computed_evidence:  # v3: claims instead of evidence judgements; one interaction conjecture
+            del out["principle_updates"]
+            for p in out["new_principles"]:
+                d, v = p["if"].split("=")
+                p["claim"] = {"condition": [{"dim": d, "value": v}], "reference": [], "direction": "increase",
+                              "min_effect": noise}
+            singles = [tuple(p["pattern"].split("=")) for p in eff]
+            pairs = [(a, b) for i, a in enumerate(singles) for b in singles[i + 1:] if a[0] != b[0]]
+            known = {str(p.get("claim", {}).get("condition")) for p in ctx.previous_principles}
+            for a, b in pairs:
+                cond = [{"dim": a[0], "value": a[1]}, {"dim": b[0], "value": b[1]}]
+                if str(cond) not in known and len(out["new_principles"]) < 3:
+                    out["new_principles"].append({
+                        "if": f"{a[0]}={a[1]} AND {b[0]}={b[1]}", "scope": "this backbone at the proxy schedule",
+                        "then": "the joint change beats the baseline by more than either alone",
+                        "because": "mock: complementary mechanisms", "disproved_if": "the joint change does not beat the baseline",
+                        "claim": {"condition": cond, "reference": [], "direction": "increase", "min_effect": 2 * noise}})
+                    break
         if ctx.propose_hypotheses:  # untried architectures within 2 dimensions of the best
             tried = set(ctx.tried or [])
             cands = [a for a in all_architectures(ctx.task) if architecture_signature(a) not in tried
                      and 1 <= count_architecture_difference(a, ctx.best["architecture"]) <= 2]
+            if ctx.model is not None:  # mock "prediction": the evidence model's mean
+                cands.sort(key=lambda a: -ctx.model.predict(a)[0])
             out["untested_combinations"] = [{"architecture": a, "rationale": "mock: untested nearby combination",
                                              "principle_ids": []} for a in cands[:2]] or [
                 {"architecture": dict(ctx.best["architecture"]), "rationale": "mock: nothing left", "principle_ids": []}]
+            if ctx.computed_evidence:
+                for h in out["untested_combinations"]:
+                    h["predicted_delta"] = round(ctx.model.predict(h["architecture"])[0], 2) if ctx.model else 0.0
         return out

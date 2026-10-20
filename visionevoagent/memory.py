@@ -40,6 +40,10 @@ class Trial:
     # Outcome of every LLM answer behind this proposal, in order: ok | duplicate | invalid | call_error.
     # Empty for methods that do not ask an LLM for the architecture. Used for the duplicate rate.
     proposal_attempts: List[str] = field(default_factory=list)
+    # Reflection v3: predictions made before training, for the prediction-accuracy analysis:
+    # {"reflector": predicted delta vs baseline (if the trial tests a Reflector hypothesis),
+    #  "model": evidence-model mean, "model_sd": its posterior sd}
+    predictions: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,10 +87,19 @@ class Principle:
     # [{"round", "type": supports|contradicts|neutral, "strength", "trials", "reason", "before", "after"}]
     evidence: List[Dict[str, Any]] = field(default_factory=list)
     transferred_from: str = ""           # task (or run) the principle was learned in, for transferred ones
+    # Reflection v3: machine-checkable claim (see evidence.py) and the latest computed statistics
+    # {"effect_mean", "effect_sd", "n_direct", "n_obs"}. Principles without a claim cannot be verified.
+    claim: Dict[str, Any] = field(default_factory=dict)
+    stats: Dict[str, Any] = field(default_factory=dict)
 
 
 def _status(conf: float) -> str:
     return "confirmed" if conf > CONFIRMED_AT else ("refuted" if conf < REFUTED_AT else "uncertain")
+
+
+def _claim_key(c: Dict[str, Any]) -> tuple:
+    terms = lambda xs: tuple(sorted((str(x.get("dim")), str(x.get("value"))) for x in (xs or [])))  # noqa: E731
+    return (terms(c.get("condition")), terms(c.get("reference")), c.get("direction"))
 
 
 def _norm(text: str) -> str:
@@ -248,21 +261,46 @@ class ArchitectureMemory:
         return p
 
     def add_principle(self, fields: Dict[str, str], task: str, round_: int,
-                      already_updated: Optional[set] = None) -> Principle:
+                      already_updated: Optional[set] = None, claim: Optional[Dict[str, Any]] = None,
+                      restate_bonus: bool = True) -> Principle:
         """Add a new falsifiable principle at confidence 0.5. If the same statement already exists
         (normalised text), the restatement counts as moderate supporting evidence instead, unless that
-        principle already received evidence in this reflection (`already_updated`)."""
+        principle already received evidence in this reflection (`already_updated`).
+        v3 (`claim` given, restate_bonus=False): a principle with the same claim as an existing one is a
+        restatement and is not added; restating never changes a confidence (the data does)."""
         text = render_principle(fields)
         key = _norm(text)
+        ckey = _claim_key(claim) if claim else None
         for p in self.principles:
-            if _norm(p.principle) == key:
-                if p.id not in (already_updated or set()):
+            if _norm(p.principle) == key or (ckey and p.claim and _claim_key(p.claim) == ckey):
+                if restate_bonus and p.id not in (already_updated or set()):
                     self.update_principle(p.id, "supports", 0.5, round_, reason="restated by the reflector")
                 return p
         p = Principle(text, INITIAL_CONFIDENCE, 0, task, round_, round_, id=self._next_principle_id(),
-                      fields={k: str(fields.get(k, "")) for k in PRINCIPLE_FIELDS})
+                      fields={k: str(fields.get(k, "")) for k in PRINCIPLE_FIELDS}, claim=dict(claim or {}))
         self.principles.append(p)
         return p
+
+    def recompute_confidence(self, model: Any, round_: int, ids: Optional[set] = None) -> List[str]:
+        """v3: set every claim-carrying principle's confidence to the evidence model's posterior
+        probability that its claim holds (evidence.EvidenceModel.confidence). Returns the updated ids."""
+        done = []
+        for p in self.principles:
+            if not p.claim or (ids is not None and p.id not in ids):
+                continue
+            st = model.confidence(p.claim)
+            before = p.confidence
+            p.confidence = round(min(CONF_BOUNDS[1], max(CONF_BOUNDS[0], st.pop("confidence"))), 4)
+            p.status = _status(p.confidence)
+            p.stats = st
+            p.last_round = round_
+            if abs(p.confidence - before) > 1e-4 or not p.evidence:
+                p.evidence.append({"round": round_, "type": "computed", "strength": None, "trials": f"n_obs={st['n_obs']}",
+                                   "reason": f"effect {st['effect_mean']:+.2f} +- {st['effect_sd']:.2f}, "
+                                             f"{st['n_direct']} direct trials",
+                                   "before": before, "after": p.confidence})
+            done.append(p.id)
+        return done
 
     def active_principles(self) -> List[Principle]:
         """Principles that may guide design: not refuted, most confident first."""

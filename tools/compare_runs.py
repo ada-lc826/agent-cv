@@ -99,6 +99,10 @@ def main() -> None:
             "fallback_rate": _ms([r.get("fallback_rate") for r in rs], 3),
             "duplicate_rate": _ms([r.get("duplicate_rate") for r in rs], 3),
             "hypothesis_rounds": _ms([r.get("n_hypothesis_rounds", 0) for r in rs], 1),
+            "reflector_pred_spearman": _ms([(r.get("predictions") or {}).get("reflector", {}).get("spearman")
+                                            for r in rs], 2),
+            "n_confirmed": _ms([(r.get("principle_status") or {}).get("confirmed", 0) for r in rs], 1),
+            "n_refuted": _ms([(r.get("principle_status") or {}).get("refuted", 0) for r in rs], 1),
             "gpu_hours": _ms([r.get("gpu_hours") for r in rs], 2),
             "llm_calls": _ms([r["llm"]["calls"] for r in rs], 1),
             "llm_tokens_k": _ms([(r["llm"]["input_tokens"] + r["llm"]["output_tokens"]) / 1000 for r in rs], 1),

@@ -38,6 +38,9 @@ def random_principles(task: str, n: int, seed: int) -> List[Principle]:
             "because": _BECAUSE.format(what=what),
             "disproved_if": _DISPROVED.format(dim=dim, val=val),
         }
+        # machine-checkable claim (reflection v3), so the random-initialisation arm is scored like any other
+        claim = {"condition": [{"dim": dim, "value": val}], "reference": [],
+                 "direction": "increase" if up else "decrease", "min_effect": lo}
         out.append(Principle(render_principle(fields), INITIAL_CONFIDENCE, 0, task, 0, 0, id=f"p{i}",
-                             fields=fields))
+                             fields=fields, claim=claim))
     return out

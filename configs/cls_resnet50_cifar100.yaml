@@ -26,6 +26,10 @@ agent:
     propose_hypotheses: true       # Reflector must propose 1-3 untested combinations (<= 2 dims from best)
     confidence_eta: 0.35           # v1: 0.2
     min_evidence_strength: 0.5     # floor for supports / contradicts strength; v1: none
+    # reflection v3 (default; --reflection_version v2 = LLM-judged evidence with the two lines above)
+    evidence_mode: computed        # confidence = posterior of the claim under a Bayesian linear model
+    prior_sd: 1.0                  # main effect prior sd (top-1 points)
+    interaction_prior_sd: 0.5      # interaction terms named by 2-term claims
 
 # Comparison methods, scaled to the 10-trial budget (see README "Comparison methods").
 baselines:

@@ -93,7 +93,9 @@ export PYTHONPATH=$PWD
    | D-8 fixed principles: generic ones from the module papers (`configs/principles_fixed_cls.json`), never updated | `--principle_mode fixed` |
    | D-9 random principles in the same format, never updated | `--principle_mode random` |
    | D-10 principles induced as usual, confidence never updated | `--principle_mode no_update` |
-   | Pilot reflection (v1): Design Agent sees the full history, no untested combinations, eta 0.2, reflect every 2 rounds. Default v2: Design Agent sees only the Reflector summary + tried list, Reflector proposes 1-3 untested combinations (<= 2 dims from the best), eta 0.35 with strength floor 0.5, reflect every round | `--reflection_version v1` |
+   | Pilot reflection (v1): Design Agent sees the full history, no untested combinations, LLM-judged evidence with eta 0.2, reflect every 2 rounds | `--reflection_version v1` |
+   | Reflection v2: Design Agent sees only the Reflector summary + tried list, Reflector proposes 1-3 untested combinations (<= 2 dims from the best), LLM-judged evidence with eta 0.35 and strength floor 0.5 | `--reflection_version v2` |
+   | Default v3: as v2, but every principle carries a machine-checkable claim and its confidence is computed from all trials by a Bayesian linear model with the measured noise (`visionevoagent/evidence.py`); the Reflector predicts each hypothesis's delta, and the summary reports prediction accuracy | (default) |
    | Principle transfer | `--init_principles runs/<other run>/principle_memory.json` (also works for `--mode lapt`) |
    | Transfer control: randomly initialised principles, updated as usual | `--init_principles random` |
    | Formal budget | `--max_rounds 30` |

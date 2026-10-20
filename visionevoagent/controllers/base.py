@@ -21,6 +21,8 @@ class Proposal:
     search_mode: str = ""
     # principles the proposal relies on, snapshot at proposal time: [{"id", "confidence", "status"}]
     cited_principles: List[Dict[str, Any]] = field(default_factory=list)
+    # predictions made before training (reflection v3), stored with the trial
+    predictions: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseController(ABC):

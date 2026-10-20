@@ -12,7 +12,9 @@ Ablations of VisionEvoAgent (each gets its own run directory automatically):
     --principle_mode fixed|random|no_update        (do the principles / online updates matter?)
     --init_principles <run>/principle_memory.json | random   (transfer vs random initialisation)
     --reflection_version v1   the pilot's reflection (Design Agent sees the full history, no hypotheses,
-                              eta 0.2, reflect every 2 rounds); default v2 from the config
+                              eta 0.2, reflect every 2 rounds)
+    --reflection_version v2   reflection-only view + untested combinations, LLM-judged evidence (eta 0.35,
+                              strength floor 0.5); default v3: confidence computed from the trials
 NADER with its original 90%-of-parent reflection threshold instead of the noise level:
     --mode nader --nader_threshold orig
 """
@@ -81,9 +83,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="online (default) | fixed | random | no_update control experiments")
     p.add_argument("--fixed_principles", default="configs/principles_fixed_cls.json",
                    help="principle file for --principle_mode fixed")
-    p.add_argument("--reflection_version", choices=("v1", "v2"),
-                   help="v2 (config default): Design Agent sees only the reflection, Reflector proposes "
-                        "untested combinations, larger confidence steps; v1: the pilot's reflection")
+    p.add_argument("--reflection_version", choices=("v1", "v2", "v3"),
+                   help="v3 (default): principle confidence computed from the trials by a Bayesian linear "
+                        "model; v2: same view and hypotheses but LLM-judged evidence; v1: the pilot's reflection")
     p.add_argument("--nader_threshold", choices=("noise", "orig"),
                    help="NADER reflection trigger: noise level (default) or the original 0.9 x parent rule")
     p.add_argument("--log_level", default="INFO")
@@ -113,8 +115,8 @@ def variant_tag(a: argparse.Namespace) -> str:
         parts.append("randinit" if a.init_principles == "random" else "transfer")
     if a.nader_threshold == "orig":
         parts.append("thr90")
-    if a.reflection_version == "v1":
-        parts.append("refv1")
+    if a.reflection_version in ("v1", "v2"):
+        parts.append("ref" + a.reflection_version)
     if a.max_rounds is not None:
         parts.append(f"t{a.max_rounds}")
     if a.thinking == "on":  # main experiments run with thinking off (configs); the thinking control is tagged
@@ -229,6 +231,8 @@ def main(argv=None) -> int:
         if a.no_param_costs:
             acfg.show_param_costs = False
         acfg.principle_mode = pmode
+        if a.reflection_version in ("v1", "v2"):
+            acfg.evidence_mode = "llm"
         if a.reflection_version == "v1":
             acfg.design_view, acfg.propose_hypotheses = "full_history", False
             acfg.confidence_eta, acfg.min_evidence_strength = None, 0.0

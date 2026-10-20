@@ -24,6 +24,12 @@ full style only):
                                  from the best); the Design Agent may take them beyond MUTATION_BUDGET
   confidence_eta / min_evidence_strength   larger step and a strength floor for non-neutral evidence
 v1 = full_history, no hypotheses, eta 0.2, no floor (run_search.py --reflection_version v1).
+Reflection v3 (2026-10-20, advisor-approved; default): evidence_mode="computed" -- the LLM conjectures,
+the experiments refute. Principles carry machine-checkable claims; their confidence is the posterior
+probability of the claim under a Bayesian linear model of all scored trials with the measured noise
+(evidence.py), recomputed every round (no eta). The Reflector no longer judges evidence; it sees the
+evidence table, writes claims and predicts the delta of each untested combination; predictions are stored
+with the trial. evidence_mode="llm" is v2 (--reflection_version v2): LLM-judged evidence, eta update.
 """
 from __future__ import annotations
 
@@ -33,6 +39,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..agents import DesignAgent, DesignContext, ReflectionContext, ReflectorAgent
 from ..agents.design_agent import HYPOTHESIS_BUDGET
+from ..evidence import EvidenceModel
+from ..evidence import fit as fit_evidence
 from ..memory import ArchitectureMemory
 from ..search_space import architecture_signature, canonicalize, count_architecture_difference, local_mutations
 from .base import BaseController, Proposal
@@ -42,6 +50,7 @@ log = logging.getLogger(__name__)
 REFLECTION_STYLES = ("full", "rule", "immediate")
 PRINCIPLE_MODES = ("online", "fixed", "random", "no_update")
 DESIGN_VIEWS = ("full_history", "reflection_only")
+EVIDENCE_MODES = ("computed", "llm")
 
 
 @dataclass
@@ -63,6 +72,10 @@ class AgentSearchConfig:
     propose_hypotheses: bool = True
     confidence_eta: Optional[float] = 0.35
     min_evidence_strength: float = 0.5
+    # reflection v3 (see module docstring); "llm" = v2
+    evidence_mode: str = "computed"          # computed | llm
+    prior_sd: float = 1.0                    # prior sd of a main effect (metric points)
+    interaction_prior_sd: float = 0.5        # prior sd of an interaction term named by a 2-term claim
 
 
 def trial_rows(memory: ArchitectureMemory) -> List[Dict[str, Any]]:
@@ -92,6 +105,8 @@ class AgentSearchController(BaseController):
             raise ValueError(f"principle_mode must be one of {PRINCIPLE_MODES}")
         if cfg.design_view not in DESIGN_VIEWS:
             raise ValueError(f"design_view must be one of {DESIGN_VIEWS}")
+        if cfg.evidence_mode not in EVIDENCE_MODES:
+            raise ValueError(f"evidence_mode must be one of {EVIDENCE_MODES}")
         self.design = design
         self.reflector = reflector
         self.cfg = cfg
@@ -138,22 +153,43 @@ class AgentSearchController(BaseController):
         ctx: Dict[str, Any] = {k: ref.get(k, []) for k in
                                ("effective_patterns", "ineffective_patterns", "synergies", "next_search_direction")}
         if self._uses_principle_memory():
-            ctx["design_principles"] = [
-                {"id": p.id, "principle": p.principle, "confidence": round(p.confidence, 3), "status": p.status,
-                 "supports": p.support_count, "contradicts": p.contradict_count,
-                 **({"transferred_from": p.transferred_from} if p.transferred_from else {})}
-                for p in memory.active_principles()[: self.cfg.max_principles_in_prompt]]
+            ctx["design_principles"] = [self._principle_entry(p)
+                                        for p in memory.active_principles()[: self.cfg.max_principles_in_prompt]]
         else:  # immediate style or principle memory ablated: only the latest reflection's new principles
             ctx["design_principles"] = ref.get("design_principles", [])
         return ctx
 
+    def _principle_entry(self, p) -> Dict[str, Any]:
+        e = {"id": p.id, "principle": p.principle, "confidence": round(p.confidence, 3), "status": p.status}
+        if self._computed() and p.claim:
+            from ..evidence import claim_text
+            e["claim"] = claim_text(p.claim)
+            if p.stats:
+                e["effect_estimate"] = f"{p.stats['effect_mean']:+.2f} +- {p.stats['effect_sd']:.2f}"
+                e["direct_trials"] = p.stats.get("n_direct", 0)
+        else:
+            e.update({"supports": p.support_count, "contradicts": p.contradict_count})
+        if p.transferred_from:
+            e["transferred_from"] = p.transferred_from
+        return e
+
     def _v2(self) -> bool:
         return self.cfg.use_reflection and self.cfg.reflection_style == "full"
+
+    def _computed(self) -> bool:
+        """v3: confidence computed from the trials, evidence table shown to both agents."""
+        return self._v2() and self.cfg.evidence_mode == "computed"
+
+    def _fit(self, memory: ArchitectureMemory) -> EvidenceModel:
+        return fit_evidence(trial_rows(memory), asdict(memory.baseline) if memory.baseline else None, self.task,
+                            self.noise_level, claims=[p.claim for p in memory.principles if p.claim],
+                            prior_sd=self.cfg.prior_sd, interaction_prior_sd=self.cfg.interaction_prior_sd)
 
     def _show_history(self) -> bool:
         return not (self._v2() and self.cfg.design_view == "reflection_only")
 
-    def _hypotheses(self, memory: ArchitectureMemory, best_arch, excluded: set) -> Optional[List[Dict[str, Any]]]:
+    def _hypotheses(self, memory: ArchitectureMemory, best_arch, excluded: set,
+                    model: Optional[EvidenceModel] = None) -> Optional[List[Dict[str, Any]]]:
         """Untested combinations from the latest reflection that are still untried and within
         HYPOTHESIS_BUDGET of the current best (canonicalized, deduplicated)."""
         if not (self._v2() and self.cfg.propose_hypotheses):
@@ -169,8 +205,16 @@ class AgentSearchController(BaseController):
             if sig in excluded or sig in seen or not 1 <= diff <= max(self.cfg.mutation_budget, HYPOTHESIS_BUDGET):
                 continue
             seen.add(sig)
-            out.append({"architecture": arch, "rationale": h.get("rationale", ""),
-                        "principle_ids": list(h.get("principle_ids", []))})
+            item = {"architecture": arch, "rationale": h.get("rationale", ""),
+                    "principle_ids": list(h.get("principle_ids", []))}
+            if model is not None:  # v3
+                if isinstance(h.get("predicted_delta"), (int, float)):
+                    item["predicted_delta"] = round(float(h["predicted_delta"]), 3)
+                mu, sd = model.predict(arch)
+                item["model_prediction"] = f"{mu:+.2f} +- {sd:.2f}"
+                item["tests"] = [{"id": p.id, "confidence": round(p.confidence, 3)}
+                                 for p in (memory.principle(i) for i in item["principle_ids"]) if p is not None]
+            out.append(item)
         return out
 
     def _uses_principle_memory(self) -> bool:
@@ -187,6 +231,8 @@ class AgentSearchController(BaseController):
         best = best_info(memory)
         budget = self._mutation_budget(memory, round_)
         excluded = memory.tried_signatures() | failed
+        model = self._fit(memory) if self._computed() else None
+        hyps = self._hypotheses(memory, best["architecture"], excluded, model)
         ctx = DesignContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best, history=trial_rows(memory),
@@ -194,14 +240,23 @@ class AgentSearchController(BaseController):
             mutation_budget=budget, noise_level=self.noise_level,
             reflection_context=self._reflection_context(memory), round=round_,
             candidate_costs=self._candidate_costs(memory, best["architecture"], budget, excluded),
-            show_history=self._show_history(), hypotheses=self._hypotheses(memory, best["architecture"], excluded))
+            show_history=self._show_history(), hypotheses=hyps,
+            evidence_table=model.table(self.task) if model is not None else None)
         arch, note, cited_ids = self.design.propose(ctx, record=self.proposal_attempts)
         cited = []
         for pid in cited_ids:  # snapshot the confidence the Design Agent saw (calibration analysis)
             p = memory.principle(pid)
             if p is not None:
                 cited.append({"id": p.id, "confidence": round(p.confidence, 4), "status": p.status})
-        return Proposal(arch, note=note, search_mode=mode, cited_principles=cited)
+        predictions: Dict[str, Any] = {}
+        if model is not None:  # predictions made before training, checked against the result
+            mu, sd = model.predict(arch)
+            predictions = {"model": round(mu, 3), "model_sd": round(sd, 3)}
+            sig = architecture_signature(arch)
+            for h in hyps or []:
+                if architecture_signature(h["architecture"]) == sig and "predicted_delta" in h:
+                    predictions["reflector"] = h["predicted_delta"]
+        return Proposal(arch, note=note, search_mode=mode, cited_principles=cited, predictions=predictions)
 
     # ------------------------------------------------------------------ reflection
     def after_trial(self, memory: ArchitectureMemory, round_: int) -> Optional[dict]:
@@ -222,6 +277,12 @@ class AgentSearchController(BaseController):
         since = last_ref["round"] if last_ref else 0
         new_trials = history[-1:] if immediate else [r for r in history if r["round"] > since]
         keep = self._learns_principles()
+        computed = self._computed() and self._uses_principle_memory()
+        model = None
+        if self._computed():
+            if keep and self.cfg.principle_mode == "online":
+                memory.recompute_confidence(self._fit(memory), round_)  # the Reflector sees current values
+            model = self._fit(memory)
         ctx = ReflectionContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best_info(memory), history=history[-1:] if immediate else history, new_trials=new_trials,
@@ -229,7 +290,9 @@ class AgentSearchController(BaseController):
             noise_level=self.noise_level,
             previous_principles=[asdict(p) for p in memory.active_principles()] if keep else [],
             propose_hypotheses=self._v2() and self.cfg.propose_hypotheses,
-            tried=sorted(memory.tried_signatures()))
+            tried=sorted(memory.tried_signatures()),
+            computed_evidence=computed, evidence_table=model.table(self.task) if model is not None else None,
+            model=model)
         ref = self.reflector.reflect(ctx)
         if ref is None:
             log.warning("round %d: reflection failed, keeping previous knowledge", round_)
@@ -243,6 +306,12 @@ class AgentSearchController(BaseController):
         """Evidence updates (one per principle per reflection, unknown ids ignored), then new principles.
         no_update: the updates are recorded in the reflection but not applied, so confidence stays 0.5."""
         updated, ignored = [], []
+        if self._computed():  # v3: add the conjectures, then let the data score every claim
+            added = [memory.add_principle(f, self.task, round_, claim=f.get("claim"), restate_bonus=False).id
+                     for f in ref["new_principles"]]
+            if self.cfg.principle_mode == "online":
+                updated = memory.recompute_confidence(self._fit(memory), round_)
+            return {"updated": updated, "ignored": [], "added": added, "evidence": "computed"}
         if self.cfg.principle_mode == "no_update":
             added = [memory.add_principle(f, self.task, round_, already_updated={p.id for p in memory.principles}).id
                      for f in ref["new_principles"]]

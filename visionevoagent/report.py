@@ -61,6 +61,47 @@ def _proposal_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
     }
 
 
+def _corr(xs: List[float], ys: List[float]) -> Any:
+    n = len(xs)
+    if n < 3:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sx = sum((x - mx) ** 2 for x in xs) ** 0.5
+    sy = sum((y - my) ** 2 for y in ys) ** 0.5
+    return round(sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / (sx * sy), 3) if sx and sy else None
+
+
+def _ranks(v: List[float]) -> List[float]:
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(order):  # average ranks for ties
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            r[order[k]] = (i + j) / 2
+        i = j + 1
+    return r
+
+
+def _prediction_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
+    """Reflection v3: were the predictions made before training right? For the Reflector's predicted
+    delta (hypothesis rounds) and the evidence model's prediction (every round): n, MAE, Pearson and
+    Spearman correlation with the measured delta vs the baseline, and the share with the right sign."""
+    out: Dict[str, Any] = {}
+    for key in ("reflector", "model"):
+        pairs = [(float(t.predictions[key]), t.delta_vs_baseline) for t in mem.trials
+                 if t.status == "ok" and t.delta_vs_baseline is not None and key in (t.predictions or {})]
+        if not pairs:
+            continue
+        p, y = [a for a, _ in pairs], [b for _, b in pairs]
+        out[key] = {"n": len(pairs), "mae": round(sum(abs(a - b) for a, b in pairs) / len(pairs), 3),
+                    "pearson": _corr(p, y), "spearman": _corr(_ranks(p), _ranks(y)),
+                    "sign_agreement": round(sum((a > 0) == (b > 0) for a, b in pairs) / len(pairs), 3)}
+    return out
+
+
 def evolution_curve(mem: ArchitectureMemory) -> List[Dict[str, Any]]:
     best = mem.baseline.score if mem.baseline else None
     sig = mem.baseline.signature if mem.baseline else None
@@ -113,6 +154,7 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
         "n_reflections": len(mem.reflections),
         "principle_status": dict(Counter(p.status for p in mem.principles)),
         "n_trials_citing_principles": sum(1 for t in mem.trials if t.cited_principles),
+        "predictions": _prediction_stats(mem),
         "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: -p.confidence)],
         "failures": [asdict(x) for x in mem.failures],
     }

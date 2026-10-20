@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
-from ..prompts import (DESIGN_REFLECTION_ADDENDUM, DESIGN_REFLECTION_ONLY_ADDENDUM, DESIGN_SYSTEM,
-                       build_design_prompt)
+from ..prompts import (DESIGN_COMPUTED_ADDENDUM, DESIGN_REFLECTION_ADDENDUM, DESIGN_REFLECTION_ONLY_ADDENDUM,
+                       DESIGN_SYSTEM, build_design_prompt)
 from ..schemas import MAX_PROPOSAL_ATTEMPTS, attempt_outcome, design_schema, validate_design
 from ..search_space import (DIMENSIONS, Architecture, architecture_signature, canonicalize,
                             count_architecture_difference, get_search_space, random_local_mutation)
@@ -35,6 +35,9 @@ class DesignContext:
     # the Reflector's untested combinations are offered; those may differ from the best in 2 dimensions
     show_history: bool = True
     hypotheses: Optional[List[Dict[str, Any]]] = None       # [{"architecture", "rationale", "principle_ids"}]
+    # v3: effect estimates computed from the trials; hypotheses then also carry "predicted_delta",
+    # "model_prediction" and "tests" ([{"id", "confidence"}] of the principles they test)
+    evidence_table: Optional[List[Dict[str, Any]]] = None
 
 HYPOTHESIS_BUDGET = 2
 
@@ -53,7 +56,8 @@ class DesignAgent:
         record = record if record is not None else []
         space = get_search_space(ctx.task)
         system = (DESIGN_SYSTEM + (DESIGN_REFLECTION_ADDENDUM if ctx.reflection_context is not None else "")
-                  + ("" if ctx.show_history else DESIGN_REFLECTION_ONLY_ADDENDUM))
+                  + ("" if ctx.show_history else DESIGN_REFLECTION_ONLY_ADDENDUM)
+                  + (DESIGN_COMPUTED_ADDENDUM if ctx.evidence_table is not None else ""))
         hyp_sigs = {architecture_signature(h["architecture"]) for h in (ctx.hypotheses or [])}
         known_ids = {p.get("id") for p in (ctx.reflection_context or {}).get("design_principles", [])
                      if isinstance(p, dict) and p.get("id")}
@@ -66,7 +70,7 @@ class DesignAgent:
                 search_mode=ctx.search_mode, mutation_budget=ctx.mutation_budget,
                 noise_level=ctx.noise_level, reflection_context=ctx.reflection_context,
                 candidate_costs=ctx.candidate_costs, feedback=feedback, show_history=ctx.show_history,
-                tried=sorted(ctx.tried), hypotheses=ctx.hypotheses)
+                tried=sorted(ctx.tried), hypotheses=ctx.hypotheses, evidence_table=ctx.evidence_table)
             try:
                 out = self.client.complete_json("design", system, user, schema,
                                                 mock_fn=lambda: self._mock(ctx, attempt))
@@ -118,6 +122,14 @@ class DesignAgent:
     def _mock(self, ctx: DesignContext, attempt: int) -> Dict[str, Any]:
         """Deterministic stand-in for the LLM (dry runs only): greedy on per-value mean delta."""
         rng = random.Random(f"{self.seed}-mock-{ctx.round}-{attempt}")
+        if ctx.hypotheses and ctx.evidence_table is not None:
+            # v3: exploit -> highest predicted gain; explore -> tests the principle closest to 0.5
+            def informativeness(h):
+                return min((abs(t["confidence"] - 0.5) for t in h.get("tests", [])), default=1.0)
+            pick = (max(ctx.hypotheses, key=lambda h: h.get("predicted_delta", 0.0)) if ctx.search_mode == "exploit"
+                    else min(ctx.hypotheses, key=informativeness))
+            return {"architecture": pick["architecture"], "rationale": f"mock: {ctx.search_mode} hypothesis",
+                    "cited_principles": list(pick.get("principle_ids", []))}
         if ctx.hypotheses and ctx.search_mode == "exploit":  # v2: test the Reflector's first hypothesis
             h = ctx.hypotheses[0]
             return {"architecture": h["architecture"], "rationale": "mock: test the reflector's hypothesis",
