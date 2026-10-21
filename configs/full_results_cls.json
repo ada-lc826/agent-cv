@@ -1,0 +1,23 @@
+{
+  "_source": "proxy check, full training (200 epochs, official recipe, fp32, seed 0), C73/E75 2026-10-14..18; noise_sd = std of the reproduced baseline (79.58 +- 0.20)",
+  "baseline_signature": "none__standard__none__late",
+  "noise_sd": 0.2,
+  "scores": {
+    "eca__standard__weighted__early": 80.19,
+    "cbam__standard__none__all": 79.78,
+    "eca__depthwise__none__early": 79.39,
+    "none__standard__none__late": 79.31,
+    "se__standard__weighted__early": 79.10,
+    "eca__dilated__none__early": 78.94,
+    "coordatt__standard__none__all": 78.78,
+    "none__depthwise__none__late": 78.49,
+    "eca__depthwise__weighted__late": 78.42,
+    "eca__depthwise__none__all": 78.14,
+    "cbam__depthwise__none__all": 77.97,
+    "eca__dilated__weighted__late": 77.74,
+    "none__dilated__none__late": 77.60,
+    "se__depthwise__none__all": 77.53,
+    "cbam__dilated__weighted__all": 76.64,
+    "eca__dilated__none__all": 76.18
+  }
+}
