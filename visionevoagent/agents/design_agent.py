@@ -38,6 +38,7 @@ class DesignContext:
     # v3: effect estimates computed from the trials; hypotheses then also carry "predicted_delta",
     # "model_prediction" and "tests" ([{"id", "confidence"}] of the principles they test)
     evidence_table: Optional[List[Dict[str, Any]]] = None
+    candidates: Optional[List[str]] = None   # untried signatures within the budget (reflection-only view)
 
 HYPOTHESIS_BUDGET = 2
 
@@ -70,7 +71,8 @@ class DesignAgent:
                 search_mode=ctx.search_mode, mutation_budget=ctx.mutation_budget,
                 noise_level=ctx.noise_level, reflection_context=ctx.reflection_context,
                 candidate_costs=ctx.candidate_costs, feedback=feedback, show_history=ctx.show_history,
-                tried=sorted(ctx.tried), hypotheses=ctx.hypotheses, evidence_table=ctx.evidence_table)
+                tried=sorted(ctx.tried), hypotheses=ctx.hypotheses, evidence_table=ctx.evidence_table,
+                candidates=ctx.candidates)
             try:
                 out = self.client.complete_json("design", system, user, schema,
                                                 mock_fn=lambda: self._mock(ctx, attempt))
@@ -126,7 +128,9 @@ class DesignAgent:
             # v3: exploit -> highest predicted gain; explore -> tests the principle closest to 0.5
             def informativeness(h):
                 return min((abs(t["confidence"] - 0.5) for t in h.get("tests", [])), default=1.0)
-            pick = (max(ctx.hypotheses, key=lambda h: h.get("predicted_delta", 0.0)) if ctx.search_mode == "exploit"
+            def model_mean(h):
+                return float(str(h.get("model_prediction", "0")).split()[0])
+            pick = (max(ctx.hypotheses, key=model_mean) if ctx.search_mode == "exploit"
                     else min(ctx.hypotheses, key=informativeness))
             return {"architecture": pick["architecture"], "rationale": f"mock: {ctx.search_mode} hypothesis",
                     "cited_principles": list(pick.get("principle_ids", []))}

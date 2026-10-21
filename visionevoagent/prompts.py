@@ -37,9 +37,10 @@ A hypothesis may differ from the current best in up to 2 dimensions even when MU
 DESIGN_COMPUTED_ADDENDUM = """
 Principle confidence is NOT an opinion: the system computes it from all trials with a statistical model \
 that knows NOISE_LEVEL (posterior probability that the principle's claim holds). EVIDENCE_TABLE gives the \
-model's effect estimates (+- sd). Each hypothesis lists the Reflector's predicted delta vs the baseline and \
-the model's prediction (+- sd). In an exploit round prefer a hypothesis with a high predicted gain; in an \
-explore round prefer one that tests a principle whose confidence is near 0.5 (most informative)."""
+model's effect estimates (+- sd); each hypothesis lists the model's predicted delta vs the baseline (+- sd) \
+and the confidence of the principles it tests. In an exploit round prefer the hypothesis with the highest \
+model-predicted gain; in an explore round prefer one that tests a principle whose confidence is near 0.5 \
+(most informative). Propose only architectures from UNTRIED CANDIDATES or HYPOTHESES_TO_TEST."""
 
 REFLECTOR_HYPOTHESES_ADDENDUM = """
 Additional duties (required):
@@ -172,7 +173,8 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                         feedback: str = "", show_history: bool = True,
                         tried: Optional[List[str]] = None,
                         hypotheses: Optional[List[Dict[str, Any]]] = None,
-                        evidence_table: Optional[List[Dict[str, Any]]] = None) -> str:
+                        evidence_table: Optional[List[Dict[str, Any]]] = None,
+                        candidates: Optional[List[str]] = None) -> str:
     if show_history:
         hist = f"HISTORY:\n{_fmt_history(history)}"
     else:  # v2: the Reflector's summary replaces the raw history; only the "do not repeat" list remains
@@ -199,6 +201,9 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
     if evidence_table:
         parts.append("EVIDENCE_TABLE (computed from all trials; estimate +- sd in metric points):\n"
                      + _fmt_evidence(evidence_table))
+    if candidates is not None:  # positive list: the B run showed a "do not repeat" list alone is not enough
+        parts.append("UNTRIED CANDIDATES within MUTATION_BUDGET of the current best "
+                     "(attention__conv__fusion__target_stage): " + (", ".join(candidates) or "none"))
     if hypotheses:
         parts.append("HYPOTHESES_TO_TEST (untested; proposed by the Reflector):\n"
                      + json.dumps(hypotheses, indent=2, ensure_ascii=False))

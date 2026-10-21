@@ -59,9 +59,10 @@ class ReflectorAgent:
             system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
         schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses,
                                    computed_evidence=ctx.computed_evidence)
+        feedback, pending = "", None   # pending: last valid reflection whose hypotheses were partly unusable
         for attempt in range(1, self.max_attempts + 1):
             try:
-                out = self.client.complete_json("reflect", system, user, schema,
+                out = self.client.complete_json("reflect", system, user + feedback, schema,
                                                 mock_fn=lambda: self._mock(ctx))
             except AgentClientFatal:
                 raise
@@ -70,11 +71,44 @@ class ReflectorAgent:
                 continue
             reason = validate_reflection(out, ctx.task, with_hypotheses=ctx.propose_hypotheses,
                                          computed_evidence=ctx.computed_evidence)
-            if reason is None:
-                out["design_principles"] = [render_principle(p) for p in out["new_principles"]]
-                return out
-            log.warning("reflection rejected (attempt %d): %s", attempt, reason)
-        return None
+            if reason is not None:
+                log.warning("reflection rejected (attempt %d): %s", attempt, reason)
+                continue
+            bad = self._unusable_hypotheses(out, ctx) if ctx.propose_hypotheses else []
+            if bad and attempt < self.max_attempts:
+                # B run (2026-10-21): the Reflector kept re-proposing tested architectures; ask again
+                log.info("reflection: %d unusable hypotheses, asking again", len(bad))
+                pending = out
+                feedback = ("\n\nYOUR PREVIOUS ANSWER WAS REJECTED: these untested_combinations are not usable "
+                            "(already tried, identical to the current best, or more than 2 dimensions away): "
+                            + ", ".join(sig for sig, _ in bad)
+                            + ". Propose untested combinations that are NOT in TRIED ARCHITECTURES.")
+                continue
+            return self._finish(out, ctx)
+        return self._finish(pending, ctx) if pending is not None else None
+
+    def _finish(self, out: Dict[str, Any], ctx: ReflectionContext) -> Dict[str, Any]:
+        if ctx.propose_hypotheses:  # keep only usable hypotheses; record the others
+            bad = dict(self._unusable_hypotheses(out, ctx))
+            if bad:
+                out["rejected_hypotheses"] = [{"signature": s, "reason": r} for s, r in bad.items()]
+                out["untested_combinations"] = [h for h in out["untested_combinations"]
+                                                if architecture_signature(h["architecture"]) not in bad]
+        out["design_principles"] = [render_principle(p) for p in out["new_principles"]]
+        return out
+
+    @staticmethod
+    def _unusable_hypotheses(out: Dict[str, Any], ctx: ReflectionContext) -> List[Tuple[str, str]]:
+        tried = set(ctx.tried or [])
+        bad = []
+        for h in out.get("untested_combinations", []):
+            sig = architecture_signature(h["architecture"])
+            diff = count_architecture_difference(h["architecture"], ctx.best["architecture"])
+            if sig in tried:
+                bad.append((sig, "already tried"))
+            elif not 1 <= diff <= 2:
+                bad.append((sig, f"{diff} dimensions from the current best"))
+        return bad
 
     # ------------------------------------------------------------------
     @staticmethod

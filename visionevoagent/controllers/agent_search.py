@@ -233,6 +233,12 @@ class AgentSearchController(BaseController):
         excluded = memory.tried_signatures() | failed
         model = self._fit(memory) if self._computed() else None
         hyps = self._hypotheses(memory, best["architecture"], excluded, model)
+        cands = None
+        if not self._show_history():  # positive list of what may still be proposed
+            cands = sorted(architecture_signature(a) for a in local_mutations(best["architecture"], self.task, budget)
+                           if architecture_signature(a) not in excluded)
+        # the Reflector's own predicted delta is recorded for evaluation but not shown to the Design Agent
+        design_hyps = [{k: v for k, v in h.items() if k != "predicted_delta"} for h in hyps] if hyps is not None else None
         ctx = DesignContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best, history=trial_rows(memory),
@@ -240,8 +246,8 @@ class AgentSearchController(BaseController):
             mutation_budget=budget, noise_level=self.noise_level,
             reflection_context=self._reflection_context(memory), round=round_,
             candidate_costs=self._candidate_costs(memory, best["architecture"], budget, excluded),
-            show_history=self._show_history(), hypotheses=hyps,
-            evidence_table=model.table(self.task) if model is not None else None)
+            show_history=self._show_history(), hypotheses=design_hyps,
+            evidence_table=model.table(self.task) if model is not None else None, candidates=cands)
         arch, note, cited_ids = self.design.propose(ctx, record=self.proposal_attempts)
         cited = []
         for pid in cited_ids:  # snapshot the confidence the Design Agent saw (calibration analysis)
