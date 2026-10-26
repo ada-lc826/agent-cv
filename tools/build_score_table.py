@@ -66,7 +66,8 @@ def import_results(patterns, seed_epochs: int, amp: bool, table: dict) -> int:
             if not (os.path.exists(rp) and os.path.exists(cp)):
                 continue
             cfg = open(cp, encoding="utf-8").read()
-            m_seed = re.search(r"randomness = dict\(seed=(\d+)", cfg)
+            # seed=N anywhere in the dict: mmengine writes the expanded config back as dict(deterministic=..., seed=N)
+            m_seed = re.search(r"randomness = dict\([^)]*seed=(\d+)", cfg)
             if (not m_seed or f"max_epochs={seed_epochs}," not in cfg
                     or ("AmpOptimWrapper" in cfg) != bool(amp)):
                 continue

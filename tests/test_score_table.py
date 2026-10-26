@@ -47,7 +47,7 @@ def trial(name, seed, epochs, amp, score):
     os.makedirs(t)
     cfg = f"train_cfg = dict(by_epoch=True, max_epochs={epochs}, val_interval={epochs})\n"
     cfg += ("optim_wrapper = dict(type='AmpOptimWrapper', optimizer=dict(lr=0.1))\n" if amp else "")
-    cfg += f"randomness = dict(seed={seed}, deterministic=False)\n"
+    cfg += f"randomness = dict(deterministic=False, seed={seed})\n"  # the order mmengine writes back
     open(os.path.join(t, "trial_config.py"), "w").write(cfg)
     json.dump({"status": "ok", "score": score, "params": 23.7, "duration_s": 800}, open(os.path.join(t, "result.json"), "w"))
 
