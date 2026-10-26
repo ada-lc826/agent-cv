@@ -95,6 +95,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "model; v2: same view and hypotheses but LLM-judged evidence; v1: the pilot's reflection")
     p.add_argument("--nader_threshold", choices=("noise", "orig"),
                    help="NADER reflection trigger: noise level (default) or the original 0.9 x parent rule")
+    p.add_argument("--score_table", default="",
+                   help="answer trials from a precomputed proxy score table (tools/build_score_table.py) instead "
+                        "of training; identical results since a fixed-seed proxy training is deterministic")
+    p.add_argument("--runs_root", default="runs", help="parent directory of the automatic run directory")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args(argv)
 
@@ -157,7 +161,7 @@ def main(argv=None) -> int:
     variant = variant_tag(a)
 
     run_dir = a.run_dir or os.path.join(
-        "runs", f"{a.task}_{a.mode}{'_' + variant if variant else ''}_s{a.seed}{'_dry' if a.dry_run else ''}")
+        a.runs_root, f"{a.task}_{a.mode}{'_' + variant if variant else ''}_s{a.seed}{'_dry' if a.dry_run else ''}")
     os.makedirs(run_dir, exist_ok=True)
     logging.basicConfig(level=a.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         handlers=[logging.StreamHandler(sys.stdout),
@@ -194,8 +198,13 @@ def main(argv=None) -> int:
             logging.info("principle control 'random': %d principles", n)
 
     # ---- runner ----
+    if a.dry_run and a.score_table:
+        raise SystemExit("--dry_run and --score_table are mutually exclusive")
     if a.dry_run:
         runner = MockRunner(seed=a.seed, noise_std=scfg.noise_level * 0.75)
+    elif a.score_table:
+        from visionevoagent.runners.table_runner import TableRunner
+        runner = TableRunner(a.score_table, a.seed)
     else:
         from visionevoagent.runners.mmpretrain_runner import MMPretrainRunner, MMPretrainRunnerConfig
         rc = MMPretrainRunnerConfig(**{**yr, "seed": a.seed,
