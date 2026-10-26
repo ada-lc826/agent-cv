@@ -90,6 +90,7 @@ def main() -> None:
         rows.append({
             "mode": mode, "variant": variant or "-", "seeds": len(rs),
             "best_improvement": _ms([r.get("best_improvement") for r in rs]),
+            "max_observed_improvement": _ms([r.get("max_observed_improvement") for r in rs]),
             "best_delta_params_M": _ms([r.get("best_delta_params") for r in rs], 3),
             "rounds_to_best": _ms([r.get("rounds_to_best") for r in rs], 1),
             "random_trials_to_match": (prefix + _ms(mult, 1)) if mult else "-",
@@ -101,6 +102,9 @@ def main() -> None:
             "hypothesis_rounds": _ms([r.get("n_hypothesis_rounds", 0) for r in rs], 1),
             "reflector_pred_spearman": _ms([(r.get("predictions") or {}).get("reflector", {}).get("spearman")
                                             for r in rs], 2),
+            "design_pred_spearman": _ms([(r.get("predictions") or {}).get("design_vs_parent", {}).get("spearman")
+                                         for r in rs], 2),
+            "selection_overrides": _ms([(r.get("selection") or {}).get("overrode_first_candidate") for r in rs], 1),
             "n_confirmed": _ms([(r.get("principle_status") or {}).get("confirmed", 0) for r in rs], 1),
             "n_refuted": _ms([(r.get("principle_status") or {}).get("refuted", 0) for r in rs], 1),
             "gpu_hours": _ms([r.get("gpu_hours") for r in rs], 2),

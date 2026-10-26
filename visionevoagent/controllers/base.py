@@ -23,6 +23,9 @@ class Proposal:
     cited_principles: List[Dict[str, Any]] = field(default_factory=list)
     # predictions made before training (reflection v3), stored with the trial
     predictions: Dict[str, Any] = field(default_factory=dict)
+    # hypothesis-guided framework: parent signature and the selection record
+    parent: str = ""
+    selection: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseController(ABC):

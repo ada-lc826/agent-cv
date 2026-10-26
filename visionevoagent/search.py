@@ -108,7 +108,8 @@ class SearchEngine:
                 raise RuntimeError(f"controller {self.controller.name} returned an illegal candidate: "
                                    f"{bad or 'already tried'}")  # a controller bug, not a trial failure
             trial = self._evaluate(r, arch, prop.note, prop.search_mode, prop.cited_principles,
-                                   attempts=self.controller.proposal_attempts, predictions=prop.predictions)
+                                   attempts=self.controller.proposal_attempts, predictions=prop.predictions,
+                                   parent=prop.parent, selection=prop.selection)
             log.info("round %d [%s] %s -> %s%s", r, prop.search_mode or "-", trial.signature,
                      trial.score if trial.status == "ok" else f"FAILED({trial.failure_reason})",
                      "  * new best" if trial.is_best else "")
@@ -148,7 +149,8 @@ class SearchEngine:
         return b.score if b else self.memory.baseline.score
 
     def _evaluate(self, r: int, arch, note: str, mode: str, cited: Optional[list] = None,
-                  attempts: Optional[list] = None, predictions: Optional[dict] = None) -> Trial:
+                  attempts: Optional[list] = None, predictions: Optional[dict] = None,
+                  parent: str = "", selection: Optional[dict] = None) -> Trial:
         mem, cfg = self.memory, self.cfg
         sig = architecture_signature(arch)
         best_before = self._current_best_score()
@@ -157,11 +159,16 @@ class SearchEngine:
                   params=res.params, failure_reason=res.failure_reason, search_mode=mode,
                   proposer_note=note, duration_s=res.duration_s, task=cfg.task,
                   cited_principles=list(cited or []), proposal_attempts=list(attempts or []),
-                  predictions=dict(predictions or {}))
+                  predictions=dict(predictions or {}), parent=parent, selection=dict(selection or {}))
         base = mem.baseline
         if res.status == "ok":
             t.delta_vs_baseline = round(res.score - base.score, 3)
             t.delta_vs_previous = round(res.score - best_before, 3)  # vs. best-so-far before this round
+            if parent:
+                ps = base.score if parent == base.signature else next(
+                    (x.score for x in mem.trials if x.signature == parent and x.score is not None), None)
+                if ps is not None:
+                    t.delta_vs_parent = round(res.score - ps, 3)
             if res.params and base.params:
                 t.param_ratio = round(res.params / base.params, 4)
             t.is_best = res.score >= best_before + cfg.min_improvement

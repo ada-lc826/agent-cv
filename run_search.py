@@ -11,6 +11,11 @@ Ablations of VisionEvoAgent (each gets its own run directory automatically):
     --mutation_budget 4  --explore_every 0  --reflect_every_n 1|2|4
     --principle_mode fixed|random|no_update        (do the principles / online updates matter?)
     --init_principles <run>/principle_memory.json | random   (transfer vs random initialisation)
+    default (v4): hypothesis-guided framework -- Design Agent proposes candidates with expected improvements,
+                              selection by expected gain / principle uncertainty / verification value,
+                              verifiable principle library with parent -> child support and counterexamples
+    --selection llm           v4 but train the Design Agent's first candidate (ablation of the selection)
+    --reflection_version v3   the B run: single proposal, Reflector proposes untested combinations
     --reflection_version v1   the pilot's reflection (Design Agent sees the full history, no hypotheses,
                               eta 0.2, reflect every 2 rounds)
     --reflection_version v2   reflection-only view + untested combinations, LLM-judged evidence (eta 0.35,
@@ -83,7 +88,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="online (default) | fixed | random | no_update control experiments")
     p.add_argument("--fixed_principles", default="configs/principles_fixed_cls.json",
                    help="principle file for --principle_mode fixed")
-    p.add_argument("--reflection_version", choices=("v1", "v2", "v3"),
+    p.add_argument("--selection", choices=("guided", "llm"),
+                   help="v4 selection: guided (default) or the Design Agent's first candidate (ablation)")
+    p.add_argument("--reflection_version", choices=("v1", "v2", "v3", "v4"),
                    help="v3 (default): principle confidence computed from the trials by a Bayesian linear "
                         "model; v2: same view and hypotheses but LLM-judged evidence; v1: the pilot's reflection")
     p.add_argument("--nader_threshold", choices=("noise", "orig"),
@@ -115,8 +122,10 @@ def variant_tag(a: argparse.Namespace) -> str:
         parts.append("randinit" if a.init_principles == "random" else "transfer")
     if a.nader_threshold == "orig":
         parts.append("thr90")
-    if a.reflection_version in ("v1", "v2"):
+    if a.reflection_version in ("v1", "v2", "v3"):
         parts.append("ref" + a.reflection_version)
+    if a.selection == "llm":
+        parts.append("selllm")
     if a.max_rounds is not None:
         parts.append(f"t{a.max_rounds}")
     if a.thinking == "on":  # main experiments run with thinking off (configs); the thinking control is tagged
@@ -231,6 +240,10 @@ def main(argv=None) -> int:
         if a.no_param_costs:
             acfg.show_param_costs = False
         acfg.principle_mode = pmode
+        if a.reflection_version in ("v1", "v2", "v3"):
+            acfg.selection, acfg.propose_hypotheses = "none", True
+        if a.selection:
+            acfg.selection = a.selection
         if a.reflection_version in ("v1", "v2"):
             acfg.evidence_mode = "llm"
         if a.reflection_version == "v1":

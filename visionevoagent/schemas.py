@@ -43,6 +43,41 @@ def design_schema(task: str, with_citations: bool = False) -> Dict[str, Any]:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
+def candidates_schema(task: str) -> Dict[str, Any]:
+    """Hypothesis-guided framework: the Design Agent proposes several candidates, each with its parent
+    (a tried architecture's signature) and an explicit expected improvement over that parent."""
+    space = get_search_space(task)
+    item = {
+        "type": "object",
+        "properties": {
+            "parent": {"type": "string"},
+            "architecture": {"type": "object",
+                             "properties": {d: {"type": "string", "enum": space[d]} for d in DIMENSIONS},
+                             "required": list(DIMENSIONS), "additionalProperties": False},
+            "expected_improvement": {"type": "number"},   # predicted score change vs the parent (metric points)
+            "rationale": {"type": "string"},
+            "cited_principles": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["parent", "architecture", "expected_improvement", "rationale", "cited_principles"],
+        "additionalProperties": False,
+    }
+    return {"type": "object", "properties": {"candidates": {"type": "array", "items": item}},
+            "required": ["candidates"], "additionalProperties": False}
+
+
+def validate_candidate(obj: Any, task: str) -> Optional[str]:
+    """Shape of one candidate (the rules -- parent tried, candidate untried, budget -- are the agent's)."""
+    if not isinstance(obj, dict):
+        return "candidate is not an object"
+    if not isinstance(obj.get("parent"), str):
+        return "candidate has no parent signature"
+    if not isinstance(obj.get("expected_improvement"), (int, float)):
+        return "candidate has no numeric expected_improvement"
+    reason = validate_design({"architecture": obj.get("architecture"), "rationale": obj.get("rationale"),
+                              "cited_principles": obj.get("cited_principles", [])}, task)
+    return reason
+
+
 _PATTERN = {
     "type": "object",
     "properties": {

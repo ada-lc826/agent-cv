@@ -30,6 +30,17 @@ probability of the claim under a Bayesian linear model of all scored trials with
 (evidence.py), recomputed every round (no eta). The Reflector no longer judges evidence; it sees the
 evidence table, writes claims and predicts the delta of each untested combination; predictions are stored
 with the trial. evidence_mode="llm" is v2 (--reflection_version v2): LLM-judged evidence, eta update.
+Hypothesis-guided framework (v4, 2026-10-26, advisor; default; requires v3 evidence):
+  1 Design Agent      proposes n_candidates candidates, each with a parent (a tried architecture) and an
+                      explicit expected improvement over it
+  2 Proxy Evaluator   trains the selected one; the trial records parent and delta_vs_parent
+  3 Reflector         verifiable principle library: conditional claims; every parent -> child comparison is
+                      logged as support / counterexample per principle; confidence = model posterior
+  4 Selection         selection.py: expected gain (model posterior + the LLM's expectation as a prior),
+                      principle uncertainty and verification value (selection="llm": the Design Agent's
+                      first candidate, ablation)
+  5 next round        new evidence revises the library
+--reflection_version v3 = the B run (single proposal, Reflector proposes untested combinations).
 """
 from __future__ import annotations
 
@@ -42,7 +53,9 @@ from ..agents.design_agent import HYPOTHESIS_BUDGET
 from ..evidence import EvidenceModel
 from ..evidence import fit as fit_evidence
 from ..memory import ArchitectureMemory
-from ..search_space import architecture_signature, canonicalize, count_architecture_difference, local_mutations
+from ..search_space import (architecture_signature, canonicalize, count_architecture_difference, from_signature,
+                            local_mutations)
+from ..selection import DEFAULT_WEIGHTS, SELECTION_MODES, choose, score_candidates
 from .base import BaseController, Proposal
 
 log = logging.getLogger(__name__)
@@ -69,13 +82,19 @@ class AgentSearchConfig:
     principle_mode: str = "online"      # online | fixed | random | no_update (see module docstring)
     # reflection v2 (see module docstring); v1 = full_history, False, None (memory.ETA = 0.2), 0.0
     design_view: str = "reflection_only"     # full_history | reflection_only
-    propose_hypotheses: bool = True
+    propose_hypotheses: bool = False         # v2/v3: the Reflector proposes untested combinations
     confidence_eta: Optional[float] = 0.35
     min_evidence_strength: float = 0.5
     # reflection v3 (see module docstring); "llm" = v2
     evidence_mode: str = "computed"          # computed | llm
     prior_sd: float = 1.0                    # prior sd of a main effect (metric points)
     interaction_prior_sd: float = 0.5        # prior sd of an interaction term named by a 2-term claim
+    # hypothesis-guided framework (v4); "none" = v3 single proposal
+    selection: str = "guided"                # guided | llm | none
+    n_candidates: int = 4
+    n_parent_options: int = 5                # best tried architectures offered as parents (+ the baseline)
+    llm_prior_sd: float = 0.75               # sd of the Design Agent's expectation used as a prior
+    selection_weights: Optional[Dict[str, Dict[str, float]]] = None   # None = selection.DEFAULT_WEIGHTS
 
 
 def trial_rows(memory: ArchitectureMemory) -> List[Dict[str, Any]]:
@@ -107,6 +126,8 @@ class AgentSearchController(BaseController):
             raise ValueError(f"design_view must be one of {DESIGN_VIEWS}")
         if cfg.evidence_mode not in EVIDENCE_MODES:
             raise ValueError(f"evidence_mode must be one of {EVIDENCE_MODES}")
+        if cfg.selection not in SELECTION_MODES:
+            raise ValueError(f"selection must be one of {SELECTION_MODES}")
         self.design = design
         self.reflector = reflector
         self.cfg = cfg
@@ -180,6 +201,10 @@ class AgentSearchController(BaseController):
         """v3: confidence computed from the trials, evidence table shown to both agents."""
         return self._v2() and self.cfg.evidence_mode == "computed"
 
+    def _guided(self) -> bool:
+        """Hypothesis-guided framework: candidate set + selection + pair evidence."""
+        return self._computed() and self.cfg.selection in ("guided", "llm")
+
     def _fit(self, memory: ArchitectureMemory) -> EvidenceModel:
         return fit_evidence(trial_rows(memory), asdict(memory.baseline) if memory.baseline else None, self.task,
                             self.noise_level, claims=[p.claim for p in memory.principles if p.claim],
@@ -232,6 +257,8 @@ class AgentSearchController(BaseController):
         budget = self._mutation_budget(memory, round_)
         excluded = memory.tried_signatures() | failed
         model = self._fit(memory) if self._computed() else None
+        if self._guided():
+            return self._propose_guided(memory, round_, mode, failed, best, budget, excluded, model)
         hyps = self._hypotheses(memory, best["architecture"], excluded, model)
         cands = None
         if not self._show_history():  # positive list of what may still be proposed
@@ -264,6 +291,48 @@ class AgentSearchController(BaseController):
                     predictions["reflector"] = h["predicted_delta"]
         return Proposal(arch, note=note, search_mode=mode, cited_principles=cited, predictions=predictions)
 
+    def _propose_guided(self, memory: ArchitectureMemory, round_: int, mode: str, failed: set,
+                        best: Dict[str, Any], budget: int, excluded: set, model: EvidenceModel) -> Proposal:
+        base = memory.baseline
+        scored_trials = sorted([t for t in memory.ok_trials()], key=lambda t: -t.score)
+        parents = [{"signature": t.signature, "architecture": t.architecture, "score": t.score,
+                    "delta": t.score - base.score} for t in scored_trials[: self.cfg.n_parent_options]]
+        if base.signature not in {p["signature"] for p in parents}:
+            parents.append({"signature": base.signature, "architecture": base.architecture, "score": base.score,
+                            "delta": 0.0})
+        cands = sorted(architecture_signature(a) for a in local_mutations(best["architecture"], self.task, budget)
+                       if architecture_signature(a) not in excluded)
+        ctx = DesignContext(
+            task=self.task, metric=self.metric, baseline=baseline_info(memory), best=best, history=trial_rows(memory),
+            tried=memory.tried_signatures(), failed=failed, search_mode=mode, mutation_budget=budget,
+            noise_level=self.noise_level, reflection_context=self._reflection_context(memory), round=round_,
+            candidate_costs=self._candidate_costs(memory, best["architecture"], budget, excluded),
+            show_history=False, evidence_table=model.table(self.task), candidates=cands,
+            parents=parents, n_candidates=self.cfg.n_candidates)
+        options = self.design.propose_candidates(ctx, record=self.proposal_attempts)
+        library = [{"id": p.id, "confidence": p.confidence, "claim": p.claim}
+                   for p in memory.active_principles() if p.claim] if self._uses_principle_memory() else []
+        deltas = {p["signature"]: p["delta"] for p in parents}
+        deltas.update({t.signature: t.score - base.score for t in memory.ok_trials()})
+        scored = score_candidates(options, model, library, deltas, best["score"] - base.score, self.noise_level,
+                                  mode, llm_prior_sd=self.cfg.llm_prior_sd,
+                                  weights=self.cfg.selection_weights or DEFAULT_WEIGHTS)
+        idx = 0 if options[0]["note"].startswith("fallback") else choose(scored, self.cfg.selection)
+        pick, s = options[idx], scored[idx]
+        cited = []
+        for pid in pick["cited_principles"]:  # snapshot the confidence the Design Agent saw
+            p = memory.principle(pid)
+            if p is not None:
+                cited.append({"id": p.id, "confidence": round(p.confidence, 4), "status": p.status})
+        predictions = {"model_vs_parent": s["model_mean"], "model_sd": s["model_sd"],
+                       "combined_vs_parent": s["combined_mean"]}
+        if pick["expected_improvement"] is not None:
+            predictions["design_vs_parent"] = round(pick["expected_improvement"], 3)
+        selection = {"mode": self.cfg.selection, "search_mode": mode, "chosen": idx, "candidates": scored}
+        note = pick["note"] + (f" [selected {idx + 1}/{len(options)}]" if len(options) > 1 else "")
+        return Proposal(pick["architecture"], note=note, search_mode=mode, cited_principles=cited,
+                        predictions=predictions, parent=pick["parent"], selection=selection)
+
     # ------------------------------------------------------------------ reflection
     def after_trial(self, memory: ArchitectureMemory, round_: int) -> Optional[dict]:
         if not self.cfg.use_reflection:
@@ -285,6 +354,12 @@ class AgentSearchController(BaseController):
         keep = self._learns_principles()
         computed = self._computed() and self._uses_principle_memory()
         model = None
+        if self._guided() and keep and memory.trials:  # parent -> child comparisons of the new trials
+            done = self.state.get("pairs_recorded_through", 0)  # controller state survives resume
+            for t in memory.trials:
+                if t.round > done and t.parent:
+                    memory.record_pair_evidence(t, from_signature(t.parent), self.noise_level)
+            self.state["pairs_recorded_through"] = max(t.round for t in memory.trials)
         if self._computed():
             if keep and self.cfg.principle_mode == "online":
                 memory.recompute_confidence(self._fit(memory), round_)  # the Reflector sees current values
@@ -298,7 +373,7 @@ class AgentSearchController(BaseController):
             propose_hypotheses=self._v2() and self.cfg.propose_hypotheses,
             tried=sorted(memory.tried_signatures()),
             computed_evidence=computed, evidence_table=model.table(self.task) if model is not None else None,
-            model=model)
+            model=model, library=self._guided())
         ref = self.reflector.reflect(ctx)
         if ref is None:
             log.warning("round %d: reflection failed, keeping previous knowledge", round_)

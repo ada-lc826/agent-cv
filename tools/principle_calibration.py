@@ -31,34 +31,14 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from visionevoagent.evidence import predicted_sign  # noqa: E402
+from visionevoagent.search_space import from_signature  # noqa: E402
+
 BINS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0001)]
 
 
 def _label(lo: float, hi: float) -> str:
     return f"[{lo:.2f}, {min(hi, 1.0):.2f}{']' if hi > 1 else ')'}"
-
-
-def _satisfies(arch: Dict[str, str], terms: List[Dict[str, str]]) -> bool:
-    return all(arch.get(t["dim"]) == t["value"] for t in terms)
-
-
-def predicted_sign(claim: Dict[str, Any], parent: Dict[str, str], child: Dict[str, str]) -> Optional[int]:
-    """+1 / -1 if the claim predicts the direction of child - parent, else None (not applicable)."""
-    if not claim:
-        return None
-    cond = claim.get("condition") or []
-    dims = {t["dim"] for t in cond}
-    if not dims or any(parent[d] != child[d] for d in parent if d not in dims) or parent == child:
-        return None
-    from visionevoagent.search_space import BASELINE
-    given = {t["dim"]: t["value"] for t in claim.get("reference") or []}
-    ref = [{"dim": d, "value": given.get(d, BASELINE[d])} for d in dims]
-    sign = 1 if claim.get("direction") == "increase" else -1
-    if _satisfies(child, cond) and _satisfies(parent, ref):
-        return sign
-    if _satisfies(parent, cond) and _satisfies(child, ref):
-        return -sign
-    return None
 
 
 def collect(pattern: str) -> List[Dict[str, Any]]:
@@ -81,20 +61,26 @@ def collect(pattern: str) -> List[Dict[str, Any]]:
         if os.path.exists(bl):
             with open(bl, encoding="utf-8") as f:
                 parent = (json.load(f) or {}).get("architecture")
+        best = parent  # implicit parent of a trial: the best before its round
         for t in sorted(trials, key=lambda t: t["round"]):
-            delta = t.get("delta_vs_previous") if t.get("status") == "ok" else None
+            ok = t.get("status") == "ok"
+            delta = t.get("delta_vs_previous") if ok else None
+            if t.get("parent"):  # explicit parent (hypothesis-guided framework)
+                parent, delta_dir = from_signature(t["parent"]), (t.get("delta_vs_parent") if ok else None)
+            else:
+                parent, delta_dir = best, delta
             for c in t.get("cited_principles", []):
                 sign = predicted_sign(claims.get(c["id"], {}), parent, t["architecture"]) if parent else None
-                hit = None if sign is None or delta is None else (delta * sign > 0)
+                hit = None if sign is None or delta_dir is None else (delta_dir * sign > 0)
                 rows.append({"run": os.path.basename(d), "round": t["round"], "principle": c["id"],
                              "confidence": c["confidence"], "status": c.get("status", ""),
                              "improved": delta is not None and delta > 0,
                              "improved_beyond_noise": delta is not None and delta > noise,
                              "direction_applicable": sign is not None,
                              "direction_hit": hit,
-                             "direction_hit_beyond_noise": None if hit is None else (hit and abs(delta) > noise)})
+                             "direction_hit_beyond_noise": None if hit is None else (hit and abs(delta_dir) > noise)})
             if t.get("is_best"):
-                parent = t["architecture"]
+                best = t["architecture"]
     return rows
 
 

@@ -90,9 +90,11 @@ def _prediction_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
     delta (hypothesis rounds) and the evidence model's prediction (every round): n, MAE, Pearson and
     Spearman correlation with the measured delta vs the baseline, and the share with the right sign."""
     out: Dict[str, Any] = {}
-    for key in ("reflector", "model"):
-        pairs = [(float(t.predictions[key]), t.delta_vs_baseline) for t in mem.trials
-                 if t.status == "ok" and t.delta_vs_baseline is not None and key in (t.predictions or {})]
+    # v3 keys predict the delta vs the baseline; v4 keys (*_vs_parent) the parent -> child difference
+    for key in ("reflector", "model", "design_vs_parent", "model_vs_parent", "combined_vs_parent"):
+        target = "delta_vs_parent" if key.endswith("_vs_parent") else "delta_vs_baseline"
+        pairs = [(float(t.predictions[key]), getattr(t, target)) for t in mem.trials
+                 if t.status == "ok" and getattr(t, target) is not None and key in (t.predictions or {})]
         if not pairs:
             continue
         p, y = [a for a, _ in pairs], [b for _, b in pairs]
@@ -100,6 +102,22 @@ def _prediction_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
                     "pearson": _corr(p, y), "spearman": _corr(_ranks(p), _ranks(y)),
                     "sign_agreement": round(sum((a > 0) == (b > 0) for a, b in pairs) / len(pairs), 3)}
     return out
+
+
+def _selection_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
+    """Hypothesis-guided selection: how often it overrode the Design Agent's first candidate, and the
+    mean terms of the chosen candidates; plus the library's parent -> child records."""
+    sel = [t.selection for t in mem.trials if t.selection and t.selection.get("candidates")]
+    if not sel:
+        return {}
+    chosen = [s["candidates"][s["chosen"]] for s in sel]
+    mean = lambda k: round(sum(c[k] for c in chosen) / len(chosen), 3)  # noqa: E731
+    pairs = Counter(e.get("type") for p in mem.principles for e in p.evidence
+                    if e.get("type") in ("support", "counterexample", "inconclusive"))
+    return {"rounds": len(sel), "overrode_first_candidate": sum(s["chosen"] != 0 for s in sel),
+            "mean_candidates": round(sum(len(s["candidates"]) for s in sel) / len(sel), 2),
+            "chosen_mean_gain": mean("gain"), "chosen_mean_uncertainty": mean("uncertainty"),
+            "chosen_mean_verification": mean("verification"), "pair_evidence": dict(pairs)}
 
 
 def evolution_curve(mem: ArchitectureMemory) -> List[Dict[str, Any]]:
@@ -155,6 +173,9 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
         "principle_status": dict(Counter(p.status for p in mem.principles)),
         "n_trials_citing_principles": sum(1 for t in mem.trials if t.cited_principles),
         "predictions": _prediction_stats(mem),
+        "selection": _selection_stats(mem),
+        "max_observed_improvement": round(max((t.delta_vs_baseline for t in mem.trials
+                                               if t.delta_vs_baseline is not None), default=0.0), 3),
         "principles": [asdict(p) for p in sorted(mem.principles, key=lambda p: -p.confidence)],
         "failures": [asdict(x) for x in mem.failures],
     }

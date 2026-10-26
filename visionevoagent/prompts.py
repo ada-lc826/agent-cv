@@ -84,15 +84,59 @@ of those dims, e.g. attention=none),
   min_effect: the size of the claimed effect in metric points (use NOISE_LEVEL unless you claim more).
 Example: "eca together with weighted fusion" -> claim {condition: [{dim: attention, value: eca}, \
 {dim: fusion, value: weighted}], reference: [], direction: increase, min_effect: 0.5}.
-5. UNTESTED COMBINATIONS: propose 1-3 architectures that do NOT appear in TRIED ARCHITECTURES and that \
+"""
+
+_V3_HYPOTHESES = """5. UNTESTED COMBINATIONS: propose 1-3 architectures that do NOT appear in TRIED ARCHITECTURES and that \
 would test the most uncertain or most promising principles, or combine changes that each looked \
 promising but were never tried together. Each may differ from the CURRENT BEST in at most 2 \
 dimensions. Give the ids of the principles each one tests, a one-sentence rationale and \
 predicted_delta: your prediction of its score minus the BASELINE score (it will be checked).
-General rules:
+"""
+
+_V4_LIBRARY = """You maintain a VERIFIABLE PRINCIPLE LIBRARY. Every trial now has a parent (the tried architecture \
+it modifies) and a measured parent -> child difference. For every principle the system records which \
+parent -> child comparisons SUPPORT it (moved as claimed) and which are COUNTEREXAMPLES (clearly did not); \
+you see the counts and the latest counterexamples. When a principle has counterexamples, look for the \
+condition under which it still holds and propose that narrower CONDITIONAL principle (add a second \
+condition term, e.g. restrict it to a stage or to an attention family) rather than restating it. The \
+Design Agent proposes the next candidates; you do not propose architectures.
+"""
+
+_V3_TAIL = """General rules:
 - Only mention modules that exist in SEARCH_SPACE; never invent new architectures.
 - With few or noisy trials, set data_sufficiency accordingly.
 Return JSON only."""
+
+REFLECTOR_SYSTEM_V4 = REFLECTOR_SYSTEM_V3 + _V4_LIBRARY + _V3_TAIL
+REFLECTOR_SYSTEM_V3 = REFLECTOR_SYSTEM_V3 + _V3_HYPOTHESES + _V3_TAIL
+
+DESIGN_SYSTEM_V4 = """You are the Design Agent of VisionEvoAgent, a system that improves an established vision \
+model by inserting modules from a fixed search space. Each round you propose a small set of candidate \
+architectures with explicit, checkable expectations; a selection step picks one to train, the result is \
+compared with its parent, and a verifiable principle library is updated from that comparison.
+Hard rules:
+- Use only values that exist in SEARCH_SPACE; never propose a tried or failed architecture.
+- Each candidate modifies one PARENT (a tried architecture from PARENT OPTIONS) in at most MUTATION_BUDGET \
+dimensions (up to 2 when it tests a principle you list in cited_principles).
+- Score differences smaller than NOISE_LEVEL are not meaningful.
+You do NOT see the raw experiment history: REFLECTION_CONTEXT (patterns, directions and the principle \
+library with confidence computed from all trials by a statistical model, supporting cases and \
+counterexamples) and EVIDENCE_TABLE are your account of what has been learned; TRIED ARCHITECTURES only \
+says what not to repeat. Use the confirmed principles, test the uncertain ones, avoid refuted patterns.
+Return JSON only."""
+
+DESIGN_CANDIDATES_ADDENDUM = """
+Propose N_CANDIDATES DIFFERENT candidates; a separate selection step trains one of them by balancing \
+expected gain, how uncertain the principles they test are, and how much the result would verify the \
+principle library. For each candidate give:
+- parent: the signature of the tried architecture you modify (one of PARENT OPTIONS);
+- architecture: at most MUTATION_BUDGET dimensions away from that parent (up to 2 if it tests a principle \
+listed in cited_principles); never a tried or failed architecture;
+- expected_improvement: your predicted score change versus the PARENT in metric points (negative if you \
+expect a drop); it is checked against the measured parent -> child difference;
+- rationale and cited_principles (ids of the principles the candidate relies on or tests).
+Make the set diverse: include the most promising refinement and at least one candidate that tests an \
+uncertain principle."""
 
 REFLECTOR_SYSTEM = """You are the Neural Architecture Reflection Agent of VisionEvoAgent.
 From the experiment history of a module-insertion search on a vision model, maintain a body of \
@@ -148,6 +192,9 @@ def _fmt_history(rows: List[Dict[str, Any]]) -> str:
         params = "-" if r.get("params") is None else f"{r['params']:.2f}"
         ratio = "-" if r.get("param_ratio") is None else f"{r['param_ratio']:.3f}"
         note = r.get("failure_reason") or ""
+        if r.get("parent"):  # hypothesis-guided framework: explicit parent -> child difference
+            dp = "-" if r.get("delta_vs_parent") is None else f"{r['delta_vs_parent']:+.2f}"
+            note = (note + " " if note else "") + f"parent={r['parent']} delta_vs_parent={dp}"
         out.append(f"{r['round']} | {a['attention']} | {a['conv']} | {a['fusion']} | {a['target_stage']} | "
                    f"{r['status']} | {score} | {delta} | {params} | {ratio} | {note}")
     return "\n".join(out)
@@ -174,7 +221,9 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                         tried: Optional[List[str]] = None,
                         hypotheses: Optional[List[Dict[str, Any]]] = None,
                         evidence_table: Optional[List[Dict[str, Any]]] = None,
-                        candidates: Optional[List[str]] = None) -> str:
+                        candidates: Optional[List[str]] = None,
+                        parents: Optional[List[Dict[str, Any]]] = None,
+                        n_candidates: int = 0) -> str:
     if show_history:
         hist = f"HISTORY:\n{_fmt_history(history)}"
     else:  # v2: the Reflector's summary replaces the raw history; only the "do not repeat" list remains
@@ -204,9 +253,18 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
     if candidates is not None:  # positive list: the B run showed a "do not repeat" list alone is not enough
         parts.append("UNTRIED CANDIDATES within MUTATION_BUDGET of the current best "
                      "(attention__conv__fusion__target_stage): " + (", ".join(candidates) or "none"))
+    if parents:
+        parts.append("PARENT OPTIONS (tried architectures you may modify; score and delta vs baseline):\n"
+                     + "\n".join(f"- {p['signature']}: {p['score']:.2f} ({p['delta']:+.2f})" for p in parents))
     if hypotheses:
         parts.append("HYPOTHESES_TO_TEST (untested; proposed by the Reflector):\n"
                      + json.dumps(hypotheses, indent=2, ensure_ascii=False))
+    if n_candidates:
+        if feedback:
+            parts.append(f"YOUR PREVIOUS ANSWER HAD NO USABLE CANDIDATE: {feedback}\nPropose different candidates.")
+        parts.append(f"N_CANDIDATES: {n_candidates}. Propose {n_candidates} different candidates, each with its "
+                     "parent, expected_improvement versus the parent, rationale and cited_principles.")
+        return "\n\n".join(parts)
     if feedback:
         parts.append(f"YOUR PREVIOUS ANSWER WAS REJECTED: {feedback}\nPropose a different candidate.")
     parts.append("Propose the next candidate architecture and explain why in one or two sentences.")
@@ -235,6 +293,13 @@ def principle_view(p: Dict[str, Any]) -> Dict[str, Any]:
             view["direct_trials"] = st.get("n_direct", 0)
         for k in ("supports", "contradicts"):
             view.pop(k, None)
+        pairs = [e for e in p.get("evidence", []) if e.get("type") in ("support", "counterexample")]
+        if pairs:  # hypothesis-guided framework: parent -> child comparisons
+            view["support_pairs"] = sum(e["type"] == "support" for e in pairs)
+            view["counterexamples"] = sum(e["type"] == "counterexample" for e in pairs)
+            ce = [e["trials"] for e in pairs if e["type"] == "counterexample"][-2:]
+            if ce:
+                view["latest_counterexamples"] = ce
     return view
 
 

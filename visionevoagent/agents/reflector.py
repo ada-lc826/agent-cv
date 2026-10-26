@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..memory import render_principle
-from ..prompts import (REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, REFLECTOR_SYSTEM_V3,
+from ..prompts import (REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, REFLECTOR_SYSTEM_V3, REFLECTOR_SYSTEM_V4,
                        build_reflection_prompt)
 from ..schemas import reflection_schema, validate_reflection
 from ..search_space import (DIMENSIONS, all_architectures, architecture_signature,
@@ -37,6 +37,7 @@ class ReflectionContext:
     computed_evidence: bool = False
     evidence_table: Optional[List[Dict[str, Any]]] = None
     model: Any = None                         # evidence.EvidenceModel (used by the dry-run mock only)
+    library: bool = False                     # v4: verifiable principle library (pair evidence, conditional refinement)
 
 
 class ReflectorAgent:
@@ -54,7 +55,7 @@ class ReflectorAgent:
             tried=ctx.tried if ctx.propose_hypotheses else None,
             evidence_table=(ctx.evidence_table or []) if ctx.computed_evidence else None)
         if ctx.computed_evidence:
-            system = REFLECTOR_SYSTEM_V3
+            system = REFLECTOR_SYSTEM_V4 if ctx.library else REFLECTOR_SYSTEM_V3
         else:
             system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
         schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses,

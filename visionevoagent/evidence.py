@@ -75,6 +75,41 @@ def claim_text(claim: Dict[str, Any]) -> str:
     return f"[{cond}] vs [{ref}]: delta {sign} {'+' if sign == '>' else '-'}{m:.2f}"
 
 
+def predicted_sign(claim: Dict[str, Any], parent: Dict[str, str], child: Dict[str, str]) -> Optional[int]:
+    """Does the claim predict the direction of the parent -> child change? +1 / -1, or None when the
+    pair is not a clean test: the two may differ only in the claim's dimensions, and one must satisfy
+    the condition while the other satisfies the reference (default: the baseline values)."""
+    if not claim or not parent or not child:
+        return None
+    p, c = canonicalize(parent), canonicalize(child)
+    cond = _terms(claim.get("condition"))
+    dims = {d for d, _ in cond}
+    if not dims or p == c or any(p[d] != c[d] for d in DIMENSIONS if d not in dims):
+        return None
+    given = dict(_terms(claim.get("reference")))
+    ref = [(d, given.get(d, BASELINE[d])) for d in dims]
+    sat = lambda a, terms: all(a[d] == v for d, v in terms)  # noqa: E731
+    sign = 1 if claim.get("direction") == "increase" else -1
+    if sat(c, cond) and sat(p, ref):
+        return sign
+    if sat(p, cond) and sat(c, ref):
+        return -sign
+    return None
+
+
+def pair_verdict(claim: Dict[str, Any], sign: int, delta: float, noise_sd: float) -> str:
+    """Classify one parent -> child comparison for a claim that predicts `sign`:
+    support (moved in the predicted direction by at least min_effect), counterexample (more than two
+    noise sd below the claimed effect, i.e. clearly not the predicted change), else inconclusive."""
+    m = float(claim.get("min_effect", noise_sd))
+    moved = sign * delta
+    if moved >= m:
+        return "support"
+    if moved <= m - 2 * noise_sd:
+        return "counterexample"
+    return "inconclusive"
+
+
 def _phi(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
@@ -144,6 +179,34 @@ class EvidenceModel:
             p = _phi((-m - mu) / sd)
         return {"confidence": p, "effect_mean": round(mu, 3), "effect_sd": round(sd, 3),
                 "n_direct": self.n_relevant(cond), "n_obs": self.n_obs}
+
+    def _phi_arch(self, arch: Dict[str, str]) -> List[float]:
+        a = canonicalize(arch)
+        return [1.0] + [float(all(a[d] == v for d, v in f)) for f in self.features]
+
+    def _quad(self, u: List[float], v: List[float]) -> float:
+        nz_u = [i for i, x in enumerate(u) if x]
+        nz_v = [j for j, x in enumerate(v) if x]
+        return sum(u[i] * v[j] * self.cov[i][j] for i in nz_u for j in nz_v)
+
+    def verification_value(self, arch: Dict[str, str], claims: Sequence[Dict[str, Any]]) -> float:
+        """How much training `arch` once would sharpen the claims: sum over claims of the relative
+        reduction of the posterior sd of the claimed effect, 1 - sd_after / sd_now (Gaussian update with
+        one more observation of `arch` at the known noise). Claims that are not modelled score 0."""
+        x = self._phi_arch(arch)
+        denom = self.noise_sd ** 2 + self._quad(x, x)
+        total = 0.0
+        for c in claims:
+            try:
+                k = self._contrast(_terms(c["condition"]), _terms(c.get("reference")))
+            except (KeyError, TypeError):
+                continue
+            var = self._quad(k, k)
+            if var <= 1e-12:
+                continue
+            after = max(var - self._quad(k, x) ** 2 / denom, 0.0)
+            total += 1.0 - math.sqrt(after / var)
+        return total
 
     def table(self, task: str) -> List[Dict[str, Any]]:
         """Main effects (and modelled interactions) for prompts: estimate +- sd and how often observed."""

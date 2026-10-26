@@ -44,6 +44,11 @@ class Trial:
     # {"reflector": predicted delta vs baseline (if the trial tests a Reflector hypothesis),
     #  "model": evidence-model mean, "model_sd": its posterior sd}
     predictions: Dict[str, Any] = field(default_factory=dict)
+    # Hypothesis-guided framework: the tried architecture this candidate modifies, the measured
+    # parent -> child difference, and the selection record (all candidates with their terms)
+    parent: str = ""
+    delta_vs_parent: Optional[float] = None
+    selection: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -281,6 +286,33 @@ class ArchitectureMemory:
         self.principles.append(p)
         return p
 
+    def record_pair_evidence(self, trial: "Trial", parent_arch: Dict[str, str], noise_sd: float) -> List[Dict[str, Any]]:
+        """Hypothesis-guided framework: classify the parent -> child comparison of `trial` for every
+        principle whose claim it tests cleanly (evidence.predicted_sign) as support / counterexample /
+        inconclusive (evidence.pair_verdict) and log it. The confidence itself stays the model posterior;
+        these records are the library's supporting cases and counterexamples."""
+        from .evidence import pair_verdict, predicted_sign
+        out = []
+        if trial.status != "ok" or trial.delta_vs_parent is None or not parent_arch:
+            return out
+        for p in self.principles:
+            sign = predicted_sign(p.claim, parent_arch, trial.architecture) if p.claim else None
+            if sign is None:
+                continue
+            v = pair_verdict(p.claim, sign, trial.delta_vs_parent, noise_sd)
+            if v == "support":
+                p.support_count += 1
+            elif v == "counterexample":
+                p.contradict_count += 1
+            else:
+                p.neutral_count += 1
+            p.evidence.append({"round": trial.round, "type": v, "strength": None,
+                               "trials": f"{trial.parent} -> {trial.signature}: {trial.delta_vs_parent:+.2f}",
+                               "reason": f"claim predicts {'+' if sign > 0 else '-'}", "before": p.confidence,
+                               "after": p.confidence})
+            out.append({"principle": p.id, "verdict": v})
+        return out
+
     def recompute_confidence(self, model: Any, round_: int, ids: Optional[set] = None) -> List[str]:
         """v3: set every claim-carrying principle's confidence to the evidence model's posterior
         probability that its claim holds (evidence.EvidenceModel.confidence). Returns the updated ids."""
@@ -294,7 +326,7 @@ class ArchitectureMemory:
             p.status = _status(p.confidence)
             p.stats = st
             p.last_round = round_
-            if abs(p.confidence - before) > 1e-4 or not p.evidence:
+            if abs(p.confidence - before) > 0.02 or p.status != _status(before) or not p.evidence:
                 p.evidence.append({"round": round_, "type": "computed", "strength": None, "trials": f"n_obs={st['n_obs']}",
                                    "reason": f"effect {st['effect_mean']:+.2f} +- {st['effect_sd']:.2f}, "
                                              f"{st['n_direct']} direct trials",
