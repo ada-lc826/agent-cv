@@ -118,6 +118,8 @@ class DesignAgent:
         schema = candidates_schema(ctx.task)
         feedback = ""
         for attempt in range(1, self.max_attempts + 1):
+            if attempt > 1:
+                record.append("reask")  # marker: one answer may hold several candidate outcomes
             user = build_design_prompt(
                 task=ctx.task, metric=ctx.metric, space=get_search_space(ctx.task), baseline=ctx.baseline,
                 history=ctx.history, best=ctx.best, failed=sorted(ctx.failed), search_mode=ctx.search_mode,

@@ -75,6 +75,17 @@ def claim_text(claim: Dict[str, Any]) -> str:
     return f"[{cond}] vs [{ref}]: delta {sign} {'+' if sign == '>' else '-'}{m:.2f}"
 
 
+def claim_key(claim: Dict[str, Any], with_direction: bool = True) -> tuple:
+    """Canonical identity of a claim: sorted condition, the reference with omitted dims filled in with
+    their baseline values ([] and the explicit baseline values are the same claim), and the direction.
+    min_effect is ignored (the same comparison at another threshold is a restatement)."""
+    cond = sorted(_terms(claim.get("condition")))
+    given = dict(_terms(claim.get("reference")))
+    ref = sorted((d, given.get(d, BASELINE[d])) for d, _ in cond)
+    key = (tuple(cond), tuple(ref))
+    return key + ((claim.get("direction"),) if with_direction else ())
+
+
 def predicted_sign(claim: Dict[str, Any], parent: Dict[str, str], child: Dict[str, str]) -> Optional[int]:
     """Does the claim predict the direction of the parent -> child change? +1 / -1, or None when the
     pair is not a clean test: the two may differ only in the claim's dimensions, and one must satisfy
@@ -189,23 +200,30 @@ class EvidenceModel:
         nz_v = [j for j, x in enumerate(v) if x]
         return sum(u[i] * v[j] * self.cov[i][j] for i in nz_u for j in nz_v)
 
-    def verification_value(self, arch: Dict[str, str], claims: Sequence[Dict[str, Any]]) -> float:
+    def verification_value(self, arch: Dict[str, str], claims: Sequence[Dict[str, Any]],
+                           weights: Optional[Sequence[float]] = None) -> float:
         """How much training `arch` once would sharpen the claims: sum over claims of the relative
         reduction of the posterior sd of the claimed effect, 1 - sd_after / sd_now (Gaussian update with
-        one more observation of `arch` at the known noise). Claims that are not modelled score 0."""
+        one more observation of `arch` at the known noise), times the claim's weight (the caller passes
+        4c(1-c), so decided claims add little). Claims that compare the same contrast are counted once.
+        Claims that are not modelled score 0."""
         x = self._phi_arch(arch)
         denom = self.noise_sd ** 2 + self._quad(x, x)
-        total = 0.0
-        for c in claims:
+        total, seen = 0.0, set()
+        for i, c in enumerate(claims):
             try:
+                key = claim_key(c, with_direction=False)
                 k = self._contrast(_terms(c["condition"]), _terms(c.get("reference")))
             except (KeyError, TypeError):
                 continue
+            if key in seen:
+                continue
+            seen.add(key)
             var = self._quad(k, k)
             if var <= 1e-12:
                 continue
             after = max(var - self._quad(k, x) ** 2 / denom, 0.0)
-            total += 1.0 - math.sqrt(after / var)
+            total += (1.0 if weights is None else weights[i]) * (1.0 - math.sqrt(after / var))
         return total
 
     def table(self, task: str) -> List[Dict[str, Any]]:

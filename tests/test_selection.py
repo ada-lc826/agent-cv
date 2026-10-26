@@ -80,4 +80,26 @@ rec = []
 out = agent.propose_candidates(ctx, record=rec)
 assert [sig(c["architecture"]) for c in out] == [sig(ECA_W)], out
 assert rec == ["ok", "invalid", "invalid", "duplicate", "invalid"], rec
+# 6. fixes after the 2026-10-26 review
+from visionevoagent.evidence import claim_key  # noqa: E402
+from visionevoagent.selection import gated_prior_sd  # noqa: E402
+assert gated_prior_sd(0.75, []) == 0.75                                   # no evidence: the base sd
+assert gated_prior_sd(0.75, [0.05] * 20) < 0.4                             # accurate agent: tighter prior
+assert gated_prior_sd(0.75, [1.5] * 20) > 1.3                              # inaccurate agent: down-weighted
+c_empty = {**claim_w, "reference": []}
+c_explicit = {**claim_w, "reference": [{"dim": "fusion", "value": "none"}], "min_effect": 0.5}
+assert claim_key(c_empty) == claim_key(c_explicit)                          # [] = baseline values; min_effect ignored
+q = mem.add_principle({**f, "because": "x"}, TASK, 3, claim=c_explicit, restate_bonus=False)
+assert q.id == p.id and len(mem.principles) == 1                            # restatement, not a new principle
+# duplicate claims are counted once in the verification value; decided claims (weight ~0) add little
+v1 = m.verification_value({**BASELINE, "fusion": "weighted"}, [claim_w])
+assert abs(m.verification_value({**BASELINE, "fusion": "weighted"}, [claim_w, c_explicit]) - v1) < 1e-9
+assert m.verification_value({**BASELINE, "fusion": "weighted"}, [claim_w], [0.04]) < 0.05 * v1 + 1e-9
+# scores use per-round normalised gain and verification
+assert max(x["score"] for x in ex) <= sum(DW for DW in (0.5, 1.0, 1.5)) + 1e-9
+# backfilled pair evidence is flagged
+mem2 = ArchitectureMemory(tempfile.mkdtemp())
+p2 = mem2.add_principle(f, TASK, 3, claim=claim_w, restate_bonus=False)
+mem2.record_pair_evidence(t, ECA, SD, ids={p2.id}, backfill=True)
+assert p2.evidence[-1].get("backfill") is True
 print("hypothesis-guided selection: all checks passed")

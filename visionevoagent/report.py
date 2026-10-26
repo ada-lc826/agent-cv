@@ -46,7 +46,9 @@ def _proposal_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
     """Duplicate rate and fallback share (decision 2026-10-13): every method gets one ask plus at most two
     re-asks; an answer naming an already-evaluated architecture counts as a duplicate, and a round whose
     attempts were all rejected falls back to a random untried architecture."""
-    answers = [o for t in mem.trials for o in t.proposal_attempts if o != "call_error"]
+    # one outcome per proposed architecture; with candidate sets (v4) an answer holds several, and
+    # "reask" marks a new answer
+    answers = [o for t in mem.trials for o in t.proposal_attempts if o not in ("call_error", "reask")]
     n = len(mem.trials)
     fallback = sum(1 for t in mem.trials if "fallback" in t.proposer_note.split(":")[0])
     dup = answers.count("duplicate")
@@ -54,7 +56,8 @@ def _proposal_stats(mem: ArchitectureMemory) -> Dict[str, Any]:
         "n_llm_answers": len(answers),
         "n_duplicate_answers": dup,
         "duplicate_rate": round(dup / len(answers), 3) if answers else None,
-        "n_rounds_reasked": sum(1 for t in mem.trials if len(t.proposal_attempts) > 1),
+        "n_rounds_reasked": sum(1 for t in mem.trials if ("reask" in t.proposal_attempts if t.selection
+                                                         else len(t.proposal_attempts) > 1)),
         "fallback_rate": round(fallback / n, 3) if n else None,
         # reflection v2: rounds that tested one of the Reflector's untested combinations
         "n_hypothesis_rounds": sum(1 for t in mem.trials if t.proposer_note.startswith("llm[hypothesis]")),

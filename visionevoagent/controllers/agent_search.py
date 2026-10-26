@@ -55,7 +55,7 @@ from ..evidence import fit as fit_evidence
 from ..memory import ArchitectureMemory
 from ..search_space import (architecture_signature, canonicalize, count_architecture_difference, from_signature,
                             local_mutations)
-from ..selection import DEFAULT_WEIGHTS, SELECTION_MODES, choose, score_candidates
+from ..selection import DEFAULT_WEIGHTS, SELECTION_MODES, choose, gated_prior_sd, score_candidates
 from .base import BaseController, Proposal
 
 log = logging.getLogger(__name__)
@@ -314,9 +314,11 @@ class AgentSearchController(BaseController):
                    for p in memory.active_principles() if p.claim] if self._uses_principle_memory() else []
         deltas = {p["signature"]: p["delta"] for p in parents}
         deltas.update({t.signature: t.score - base.score for t in memory.ok_trials()})
+        errors = [t.predictions["design_vs_parent"] - t.delta_vs_parent for t in memory.trials
+                  if t.delta_vs_parent is not None and "design_vs_parent" in (t.predictions or {})]
+        prior_sd = gated_prior_sd(self.cfg.llm_prior_sd, errors)
         scored = score_candidates(options, model, library, deltas, best["score"] - base.score, self.noise_level,
-                                  mode, llm_prior_sd=self.cfg.llm_prior_sd,
-                                  weights=self.cfg.selection_weights or DEFAULT_WEIGHTS)
+                                  mode, llm_prior_sd=prior_sd, weights=self.cfg.selection_weights or DEFAULT_WEIGHTS)
         idx = 0 if options[0]["note"].startswith("fallback") else choose(scored, self.cfg.selection)
         pick, s = options[idx], scored[idx]
         cited = []
@@ -328,7 +330,8 @@ class AgentSearchController(BaseController):
                        "combined_vs_parent": s["combined_mean"]}
         if pick["expected_improvement"] is not None:
             predictions["design_vs_parent"] = round(pick["expected_improvement"], 3)
-        selection = {"mode": self.cfg.selection, "search_mode": mode, "chosen": idx, "candidates": scored}
+        selection = {"mode": self.cfg.selection, "search_mode": mode, "chosen": idx, "candidates": scored,
+                     "llm_prior_sd": round(prior_sd, 3), "n_design_errors": len(errors)}
         note = pick["note"] + (f" [selected {idx + 1}/{len(options)}]" if len(options) > 1 else "")
         return Proposal(pick["architecture"], note=note, search_mode=mode, cited_principles=cited,
                         predictions=predictions, parent=pick["parent"], selection=selection)
@@ -388,8 +391,15 @@ class AgentSearchController(BaseController):
         no_update: the updates are recorded in the reflection but not applied, so confidence stays 0.5."""
         updated, ignored = [], []
         if self._computed():  # v3: add the conjectures, then let the data score every claim
+            before = {p.id for p in memory.principles}
             added = [memory.add_principle(f, self.task, round_, claim=f.get("claim"), restate_bonus=False).id
                      for f in ref["new_principles"]]
+            new_ids = set(added) - before
+            if self._guided() and new_ids:  # past parent -> child comparisons bear on the new principles too
+                for t in memory.trials:
+                    if t.parent and t.round <= round_:
+                        memory.record_pair_evidence(t, from_signature(t.parent), self.noise_level,
+                                                    ids=new_ids, backfill=True)
             if self.cfg.principle_mode == "online":
                 updated = memory.recompute_confidence(self._fit(memory), round_)
             return {"updated": updated, "ignored": [], "added": added, "evidence": "computed"}

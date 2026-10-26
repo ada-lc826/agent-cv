@@ -103,8 +103,11 @@ def _status(conf: float) -> str:
 
 
 def _claim_key(c: Dict[str, Any]) -> tuple:
-    terms = lambda xs: tuple(sorted((str(x.get("dim")), str(x.get("value"))) for x in (xs or [])))  # noqa: E731
-    return (terms(c.get("condition")), terms(c.get("reference")), c.get("direction"))
+    from .evidence import claim_key  # [] and the explicit baseline values are the same reference
+    try:
+        return claim_key(c)
+    except (KeyError, TypeError):
+        return (str(c),)
 
 
 def _norm(text: str) -> str:
@@ -286,16 +289,21 @@ class ArchitectureMemory:
         self.principles.append(p)
         return p
 
-    def record_pair_evidence(self, trial: "Trial", parent_arch: Dict[str, str], noise_sd: float) -> List[Dict[str, Any]]:
+    def record_pair_evidence(self, trial: "Trial", parent_arch: Dict[str, str], noise_sd: float,
+                             ids: Optional[set] = None, backfill: bool = False) -> List[Dict[str, Any]]:
         """Hypothesis-guided framework: classify the parent -> child comparison of `trial` for every
         principle whose claim it tests cleanly (evidence.predicted_sign) as support / counterexample /
         inconclusive (evidence.pair_verdict) and log it. The confidence itself stays the model posterior;
-        these records are the library's supporting cases and counterexamples."""
+        these records are the library's supporting cases and counterexamples. `ids` restricts it to some
+        principles; backfill=True marks comparisons that existed before the principle was proposed (the
+        Reflector may have induced it from them, so they are not independent support)."""
         from .evidence import pair_verdict, predicted_sign
         out = []
         if trial.status != "ok" or trial.delta_vs_parent is None or not parent_arch:
             return out
         for p in self.principles:
+            if ids is not None and p.id not in ids:
+                continue
             sign = predicted_sign(p.claim, parent_arch, trial.architecture) if p.claim else None
             if sign is None:
                 continue
@@ -309,7 +317,7 @@ class ArchitectureMemory:
             p.evidence.append({"round": trial.round, "type": v, "strength": None,
                                "trials": f"{trial.parent} -> {trial.signature}: {trial.delta_vs_parent:+.2f}",
                                "reason": f"claim predicts {'+' if sign > 0 else '-'}", "before": p.confidence,
-                               "after": p.confidence})
+                               "after": p.confidence, **({"backfill": True} if backfill else {})})
             out.append({"principle": p.id, "verdict": v})
         return out
 
