@@ -3,8 +3,8 @@
 # Usage: python run_search.py --config configs/nb201_cifar100.yaml --task nb201_cifar100 #            --score_table runs/score_table_nb201/nb201_cifar100.json --mode agent_reflect --seed 0 --max_rounds 50
 search:
   max_rounds: 50
-  min_improvement: 0.25       # = median seed sd of the 200-epoch results in the table (points)
-  noise_level: 0.25
+  min_improvement: 0.29       # = median seed sd of the 200-epoch results in the table (points)
+  noise_level: 0.29
   early_stop_patience: 0
   max_consecutive_failures: 5
 
