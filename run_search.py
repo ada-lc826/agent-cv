@@ -42,6 +42,7 @@ from visionevoagent.controllers import (REFLECTION_STYLES, AgentSearchConfig, Ag
 from visionevoagent.memory import ArchitectureMemory
 from visionevoagent.runners import MockRunner
 from visionevoagent.search import SearchConfig, SearchEngine
+from visionevoagent.search_space import activate
 
 AGENT_MODES = ("agent", "agent_reflect")
 LLM_BASELINES = ("genius", "evoprompting", "llmatic", "lapt", "nader")
@@ -98,6 +99,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--score_table", default="",
                    help="answer trials from a precomputed proxy score table (tools/build_score_table.py) instead "
                         "of training; identical results since a fixed-seed proxy training is deterministic")
+    p.add_argument("--table_seed", type=int, default=None,
+                   help="training seed of the score table to read (default: --seed). Lets more search seeds "
+                        "than the table has training seeds run, e.g. --seed 4 --table_seed 1")
     p.add_argument("--runs_root", default="runs", help="parent directory of the automatic run directory")
     p.add_argument("--log_level", default="INFO")
     return p.parse_args(argv)
@@ -156,6 +160,7 @@ def build_client(a: argparse.Namespace, ya: dict, run_dir: str) -> AgentClient:
 
 def main(argv=None) -> int:
     a = parse_args(argv)
+    activate(a.task)  # module-insertion space or NAS-Bench-201; must precede everything that reads the space
     y = load_yaml(a.config)
     ys, ya, yb, yr = y.get("search", {}), y.get("agent", {}), y.get("baselines", {}), y.get("runner", {})
     variant = variant_tag(a)
@@ -204,7 +209,7 @@ def main(argv=None) -> int:
         runner = MockRunner(seed=a.seed, noise_std=scfg.noise_level * 0.75)
     elif a.score_table:
         from visionevoagent.runners.table_runner import TableRunner
-        runner = TableRunner(a.score_table, a.seed)
+        runner = TableRunner(a.score_table, a.seed if a.table_seed is None else a.table_seed)
     else:
         from visionevoagent.runners.mmpretrain_runner import MMPretrainRunner, MMPretrainRunnerConfig
         rc = MMPretrainRunnerConfig(**{**yr, "seed": a.seed,

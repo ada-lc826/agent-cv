@@ -92,7 +92,10 @@ class AgentClient:
         if temperature is not None:
             record["temperature"] = temperature
             record["temperature_applied"] = self.temperature_effective
+        from .prompts import adapt_text  # wording of the active search space (identity for modules)
+        system = adapt_text(system)
         messages = [{"role": "user", "content": user}] if isinstance(user, str) else list(user)
+        messages = [{**m, "content": adapt_text(m.get("content"))} for m in messages]
         try:
             if self.cfg.provider == "mock":
                 out = mock_fn()

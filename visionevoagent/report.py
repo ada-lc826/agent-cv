@@ -14,9 +14,13 @@ from .search_space import DIMENSIONS
 if TYPE_CHECKING:
     from .search import SearchConfig
 
-CSV_FIELDS = ["round", "signature"] + DIMENSIONS + [
-    "status", "score", "params", "delta_vs_baseline", "delta_vs_previous", "param_ratio", "is_best",
-    "search_mode", "failure_reason", "duration_s", "proposer_note"]
+_TRIAL_FIELDS = ["status", "score", "params", "delta_vs_baseline", "delta_vs_previous", "param_ratio", "is_best",
+                 "search_mode", "failure_reason", "duration_s", "proposer_note"]
+
+
+def csv_fields() -> List[str]:
+    """Built on use: the dimensions depend on the active search space (search_space.activate)."""
+    return ["round", "signature"] + DIMENSIONS + _TRIAL_FIELDS
 
 
 def _llm_usage(run_dir: str) -> Dict[str, Any]:
@@ -139,11 +143,12 @@ def write_reports(mem: ArchitectureMemory, cfg: "SearchConfig", stop_reason: str
     root = cfg.run_dir
     rows = ([mem.baseline] if mem.baseline else []) + sorted(mem.trials, key=lambda t: t.round)
     with open(os.path.join(root, "search_history.csv"), "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        fields = csv_fields()
+        w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         for t in rows:
             d = asdict(t)
-            w.writerow({**{k: d.get(k) for k in CSV_FIELDS if k not in DIMENSIONS},
+            w.writerow({**{k: d.get(k) for k in fields if k not in DIMENSIONS},
                         **{k: t.architecture[k] for k in DIMENSIONS}})
 
     curve = evolution_curve(mem)

@@ -4,7 +4,15 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from .search_space import DIMENSIONS, MODULE_NOTES
+from .search_space import DIMENSIONS, MODULE_NOTES, space_note
+
+
+def _sig_format() -> str:
+    return "__".join(DIMENSIONS)
+
+
+def _cols() -> str:
+    return " | ".join(DIMENSIONS)
 
 DESIGN_SYSTEM = """You are the Design Agent of VisionEvoAgent, a system that improves an established vision \
 model by inserting modules from a fixed search space.
@@ -173,7 +181,7 @@ Return JSON only."""
 
 
 def _fmt_space(space: Dict[str, List[str]]) -> str:
-    lines = []
+    lines = [space_note()] if space_note() else []
     for d in DIMENSIONS:
         opts = ", ".join(f"{o} ({MODULE_NOTES[o]})" if o in MODULE_NOTES else o for o in space[d])
         lines.append(f"- {d}: {opts}")
@@ -183,7 +191,7 @@ def _fmt_space(space: Dict[str, List[str]]) -> str:
 def _fmt_history(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "(no trials yet)"
-    head = "round | attention | conv | fusion | target_stage | status | score | delta_vs_baseline | params(M) | param_ratio | note"
+    head = f"round | {_cols()} | status | score | delta_vs_baseline | params(M) | param_ratio | note"
     out = [head]
     for r in rows:
         a = r["architecture"]
@@ -195,7 +203,7 @@ def _fmt_history(rows: List[Dict[str, Any]]) -> str:
         if r.get("parent"):  # hypothesis-guided framework: explicit parent -> child difference
             dp = "-" if r.get("delta_vs_parent") is None else f"{r['delta_vs_parent']:+.2f}"
             note = (note + " " if note else "") + f"parent={r['parent']} delta_vs_parent={dp}"
-        out.append(f"{r['round']} | {a['attention']} | {a['conv']} | {a['fusion']} | {a['target_stage']} | "
+        out.append(f"{r['round']} | {' | '.join(a[d] for d in DIMENSIONS)} | "
                    f"{r['status']} | {score} | {delta} | {params} | {ratio} | {note}")
     return "\n".join(out)
 
@@ -205,7 +213,7 @@ def _fmt_costs(costs: List[Dict[str, Any]], baseline_params: float, limit: int =
     out = []
     for c in rows:
         a = c["architecture"]
-        out.append(f"- {a['attention']} | {a['conv']} | {a['fusion']} | {a['target_stage']}: "
+        out.append(f"- {' | '.join(a[d] for d in DIMENSIONS)}: "
                    f"{c['params'] - baseline_params:+.2f}M (x{c['params'] / baseline_params:.3f})")
     if len(costs) > limit:
         out.append(f"(... {len(costs) - limit} more, all larger)")
@@ -227,7 +235,7 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
     if show_history:
         hist = f"HISTORY:\n{_fmt_history(history)}"
     else:  # v2: the Reflector's summary replaces the raw history; only the "do not repeat" list remains
-        hist = ("TRIED ARCHITECTURES (attention__conv__fusion__target_stage; do not repeat): "
+        hist = (f"TRIED ARCHITECTURES ({_sig_format()}; do not repeat): "
                 + (", ".join(sorted(tried or [])) or "none"))
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
@@ -242,7 +250,7 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
     ]
     if candidate_costs:
         parts.append("CANDIDATE COSTS (every untried architecture within MUTATION_BUDGET of the current best, "
-                     "as attention | conv | fusion | target_stage: params vs baseline). Weigh the expected gain "
+                     f"as {_cols()}: params vs baseline). Weigh the expected gain "
                      "against this cost; a gain within NOISE_LEVEL does not justify extra parameters.\n"
                      + _fmt_costs(candidate_costs, baseline["params"]))
     if reflection_context is not None:
@@ -252,7 +260,7 @@ def build_design_prompt(*, task: str, metric: str, space: Dict[str, List[str]], 
                      + _fmt_evidence(evidence_table))
     if candidates is not None:  # positive list: the B run showed a "do not repeat" list alone is not enough
         parts.append("UNTRIED CANDIDATES within MUTATION_BUDGET of the current best "
-                     "(attention__conv__fusion__target_stage): " + (", ".join(candidates) or "none"))
+                     f"({_sig_format()}): " + (", ".join(candidates) or "none"))
     if parents:
         parts.append("PARENT OPTIONS (tried architectures you may modify; score and delta vs baseline):\n"
                      + "\n".join(f"- {p['signature']}: {p['score']:.2f} ({p['delta']:+.2f})" for p in parents))
@@ -331,7 +339,64 @@ def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str
         parts.append("EVIDENCE_TABLE (Bayesian linear model over all scored trials, baseline included; "
                      "estimate +- sd in metric points):\n" + (_fmt_evidence(evidence_table) or "none"))
     if tried is not None:
-        parts.append("TRIED ARCHITECTURES (attention__conv__fusion__target_stage; untested combinations must "
+        parts.append(f"TRIED ARCHITECTURES ({_sig_format()}; untested combinations must "
                      "not be among these): " + (", ".join(sorted(tried)) or "none"))
     parts.append("Produce the reflection.")
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------- NAS-Bench-201 wording (2026-10-30)
+# The prompts above are written for the module-insertion space and are used unchanged there. In the
+# NAS-Bench-201 space every system and user text passes through adapt_text (agent_client), which swaps
+# these exact phrases; the structure of every prompt stays the same.
+NB201_PHRASES = [
+    ("improves an established vision model by inserting modules from a fixed search space",
+     "improves a cell-based vision network (NAS-Bench-201) by choosing the operation on each edge of its "
+     "cell from a fixed search space"),
+    ("From the experiment history of a module-insertion search on a vision model",
+     "From the experiment history of a cell search on a vision network (NAS-Bench-201)"),
+    ("(modules that help, hurt, or are not worth their parameter cost)",
+     "(operations or edge placements that help, hurt, or are not worth their parameter cost)"),
+    ("Synergies or conflicts between modules.", "Synergies or conflicts between operations on different edges."),
+    ("(stages, module family, model / task)", "(which edges or nodes of the cell, operation family, dataset)"),
+    ("of those dims, e.g. attention=none)", "of those dims, e.g. edge_1_3=none)"),
+    ('Example: "eca together with weighted fusion" -> claim {condition: [{dim: attention, value: eca}, '
+     '{dim: fusion, value: weighted}], reference: [], direction: increase, min_effect: 0.5}.',
+     'Example: "3x3 convolutions on both edge_0_2 and edge_1_3" -> claim {condition: [{dim: edge_0_2, value: '
+     'nor_conv_3x3}, {dim: edge_1_3, value: nor_conv_3x3}], reference: [], direction: increase, min_effect: 0.5}.'),
+    ("e.g. restrict it to a stage or to an attention family", "e.g. restrict it to an operation on another edge"),
+    ('"ECA scored highest" is a restatement; "lightweight channel attention is consistently beneficial and '
+     'outperforms heavier attention at this parameter budget" is an induction.',
+     '"this cell scored highest" is a restatement; "a 3x3 convolution on a path into the output node is '
+     'consistently beneficial while pooling there hurts" is an induction.'),
+    # GENIUS (its original prompt was written for NAS-Bench-201)
+    ("help me choose modules to insert into an existing vision model so that",
+     "help me design the cell of a cell-based vision network (NAS-Bench-201) so that"),
+    ("The model is a fixed, already trained-from-scratch baseline. A candidate is defined by four choices:",
+     "The network stacks one cell; a candidate is defined by the operation on each of the six cell edges:"),
+    ("consider where in the network each option acts", "consider what each operation does on each edge"),
+    # EvoPrompting, LLMatic, LAPT
+    ("a choice of modules from", "a choice of one operation per cell edge from"),
+    # LLMatic instructions that only make sense for modules
+    ("Add a module to improve the network.", "Add a connection (replace a none edge) to improve the network."),
+    ("Remove a module to improve the network.", "Remove a connection (set an edge to none) to improve the network."),
+    ("Improve the network by changing how the last stages' features are combined.",
+     "Improve the network by changing how the nodes are combined into the cell output."),
+    ("Improve the network by changing where its modules are placed.",
+     "Improve the network by moving operations to other edges."),
+    ("Improve the network by adding attention.", "Improve the network by adding a skip connection."),
+    ("Improve the network by applying its modules to more stages.",
+     "Improve the network by adding multiple skip connections."),
+    ("Improve the network by making its modules lighter.", "Improve the network by making its operations lighter."),
+    ("Improve the network by adding channel recalibration.", "Improve the network by adding a pooling operation."),
+]
+
+
+def adapt_text(text: str) -> str:
+    """Prompt text for the active search space (identity for the module-insertion space)."""
+    from . import search_space
+    if search_space.ACTIVE != "nb201" or not isinstance(text, str):
+        return text
+    for old, new in NB201_PHRASES:
+        text = text.replace(old, new)
+    return text
