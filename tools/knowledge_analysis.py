@@ -23,6 +23,7 @@ import csv
 import glob
 import json
 import os
+import random
 import statistics
 import sys
 from collections import defaultdict
@@ -34,9 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_principles_full import spearman  # noqa: E402
 from principle_calibration import BINS, _label, collect  # noqa: E402
 from visionevoagent.evidence import fit  # noqa: E402
-from visionevoagent.search_space import architecture_signature, from_signature  # noqa: E402
+from visionevoagent.search_space import activate, architecture_signature, from_signature  # noqa: E402
 
-TASK = "classification"
+TASK = "classification"  # set from --task in main()
 
 
 def _ms(xs: List[Optional[float]], digits: int = 2) -> str:
@@ -60,9 +61,9 @@ def norm(sig: str) -> str:
     return architecture_signature(from_signature(sig))
 
 
-def load_runs(root: str) -> List[Dict[str, Any]]:
+def load_runs(root: str, task: str = "classification") -> List[Dict[str, Any]]:
     runs = []
-    for d in sorted(glob.glob(os.path.join(root, "classification_*"))):
+    for d in sorted(glob.glob(os.path.join(root, f"{task}_*"))):
         s = _json(os.path.join(d, "search_summary.json"))
         if not s or s.get("stop_reason") == "running":
             continue
@@ -95,9 +96,14 @@ def calibration(runs) -> List[Dict[str, Any]]:
     return rows
 
 
+def tseed(table, seed: str) -> str:
+    """Table seed read by a search seed (run_matrix --table_seeds: seed % number of table seeds)."""
+    return seed if seed in table["seeds"] else str(int(seed) % len(table["seeds"]))
+
+
 def model_quality(runs, table, full) -> List[Dict[str, Any]]:
-    fsig = norm(full["baseline_signature"])
-    fscores = {norm(s): v for s, v in full["scores"].items()}
+    fsig = norm(full["baseline_signature"]) if full else None
+    fscores = {norm(s): v for s, v in full["scores"].items()} if full else {}
     per_run = []
     for r in runs:
         if not r["baseline"] or not r["trials"]:
@@ -105,8 +111,10 @@ def model_quality(runs, table, full) -> List[Dict[str, Any]]:
         rows = [{"architecture": t["architecture"], "status": t.get("status"), "score": t.get("score")}
                 for t in r["trials"]]
         seen = {norm(t["signature"]) for t in r["trials"]} | {norm(r["baseline"]["signature"])}
-        truth = {s: v["score"] for s, v in table["seeds"][r["seed"]].items() if v.get("status") == "ok"}
+        truth = {s: v["score"] for s, v in table["seeds"][tseed(table, r["seed"])].items() if v.get("status") == "ok"}
         unseen = [s for s in truth if s not in seen]
+        if len(unseen) > 3000:  # NAS-Bench-201: a fixed random sample of the untrained cells keeps this fast
+            unseen = random.Random(0).sample(sorted(unseen), 3000)
         claims = [p["claim"] for p in r["principles"] if p.get("claim")]
         out = {"group": r["group"], "n_unseen": len(unseen)}
         for tag, cl in (("main", []), ("claims", claims)):
@@ -117,7 +125,7 @@ def model_quality(runs, table, full) -> List[Dict[str, Any]]:
             out[f"table_unseen_{tag}"] = spearman([pred(s) for s in unseen], [truth[s] for s in unseen]) \
                 if len(unseen) >= 4 else None
             fs = [s for s in fscores if s != fsig]
-            out[f"full_{tag}"] = spearman([pred(s) for s in fs], [fscores[s] for s in fs])
+            out[f"full_{tag}"] = spearman([pred(s) for s in fs], [fscores[s] for s in fs]) if fs else None
             # true rank (1 = best) of the untrained architecture the model rates highest
             if unseen:
                 top = max(unseen, key=pred)
@@ -142,7 +150,7 @@ def model_quality(runs, table, full) -> List[Dict[str, Any]]:
 def selection_counterfactual(runs, table) -> List[Dict[str, Any]]:
     groups = defaultdict(lambda: defaultdict(list))
     for r in runs:
-        truth = {s: v["score"] for s, v in table["seeds"][r["seed"]].items() if v.get("status") == "ok"}
+        truth = {s: v["score"] for s, v in table["seeds"][tseed(table, r["seed"])].items() if v.get("status") == "ok"}
         g = groups[r["group"]]
         for t in r["trials"]:
             sel = t.get("selection") or {}
@@ -214,13 +222,18 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--runs", default="runs_main")
     p.add_argument("--score_table", required=True)
-    p.add_argument("--full", required=True)
+    p.add_argument("--full", default="", help="full-training results (classification only)")
+    p.add_argument("--task", default="classification", help="classification or nb201_<dataset> (2026-10-30)")
+
     p.add_argument("--out", default="")
     a = p.parse_args()
+    global TASK
+    TASK = a.task
+    activate(a.task)
     table = _json(a.score_table)
     table = {"seeds": {s: {norm(k): v for k, v in rows.items()} for s, rows in table["seeds"].items()}}
-    full = _json(a.full)
-    runs = load_runs(a.runs)
+    full = _json(a.full) if a.full else None
+    runs = load_runs(a.runs, a.task)
 
     parts = {"calibration": calibration(runs), "model_quality": model_quality(runs, table, full),
              "selection": selection_counterfactual(runs, table)}

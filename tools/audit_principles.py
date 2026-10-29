@@ -35,10 +35,10 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from visionevoagent.evidence import _terms, claim_key, claim_text, fit  # noqa: E402
-from visionevoagent.search_space import (BASELINE, architecture_signature, canonicalize,  # noqa: E402
+from visionevoagent.search_space import (BASELINE, activate, architecture_signature, canonicalize,  # noqa: E402
                                          from_signature)
 
-TASK = "classification"
+TASK = "classification"  # set from --task in main()
 
 
 def mean_table(table: Dict[str, Any]) -> Dict[str, float]:
@@ -139,9 +139,13 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--runs", required=True, help="glob of run directories")
     p.add_argument("--score_table", required=True)
-    p.add_argument("--noise", type=float, default=0.25, help="proxy seed noise of one training")
+    p.add_argument("--noise", type=float, default=0.25, help="seed noise of one training (nb201: the config's noise_level)")
+    p.add_argument("--task", default="classification", help="classification or nb201_<dataset> (2026-10-30)")
     p.add_argument("--out", default="")
     a = p.parse_args()
+    global TASK
+    TASK = a.task
+    activate(a.task)
     table = json.load(open(a.score_table, encoding="utf-8"))
     n_seeds = len(table["seeds"])
     scores = mean_table(table)

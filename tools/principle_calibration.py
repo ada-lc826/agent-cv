@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from visionevoagent.evidence import predicted_sign  # noqa: E402
-from visionevoagent.search_space import from_signature  # noqa: E402
+from visionevoagent.search_space import activate, from_signature  # noqa: E402
 
 BINS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0001)]
 
@@ -105,7 +105,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--runs", required=True, help="glob of run directories")
     p.add_argument("--out", default="")
+    p.add_argument("--task", default="classification", help="classification or nb201_<dataset> (2026-10-30)")
     a = p.parse_args()
+    activate(a.task)
     rows = collect(a.runs)
     if not rows:
         print("no cited principles found (needs agent_reflect runs with the full reflection style)")

@@ -42,7 +42,8 @@ def run_stats(run_dir: str, optimum: Dict[str, float], budgets: List[int]) -> Op
     if s.get("stop_reason") == "running" or not s.get("baseline"):
         return None
     base = s["baseline"]["score"]
-    opt = optimum[str(s["seed"])]
+    seed = str(s["seed"])  # search seeds beyond the table's read table seed seed % n (run_matrix --table_seeds)
+    opt = optimum[seed] if seed in optimum else optimum[str(s["seed"] % len(optimum))]
     trials = [p for p in curve[1:] if p.get("score") is not None]
     out = {"mode": s["mode"], "variant": s.get("variant", ""), "seed": s["seed"]}
     for b in budgets:
@@ -62,6 +63,7 @@ def run_stats(run_dir: str, optimum: Dict[str, float], budgets: List[int]) -> Op
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--runs", default="runs_main")
+    p.add_argument("--task", default="classification", help="classification or nb201_<dataset> (2026-10-30)")
     p.add_argument("--score_table", required=True)
     p.add_argument("--budgets", type=int, nargs="+", default=[5, 10, 15, 20, 30])
     p.add_argument("--out", default="")
@@ -70,7 +72,7 @@ def main() -> None:
     table = json.load(open(a.score_table, encoding="utf-8"))
     optimum = {s: max(r["score"] for r in rows.values() if r.get("status") == "ok")
                for s, rows in table["seeds"].items()}
-    runs = [x for d in sorted(glob.glob(os.path.join(a.runs, "classification_*")))
+    runs = [x for d in sorted(glob.glob(os.path.join(a.runs, f"{a.task}_*")))
             if os.path.isdir(d) and (x := run_stats(d, optimum, a.budgets))]
     groups = defaultdict(list)
     for r in runs:
