@@ -83,11 +83,14 @@ def calibration(runs) -> List[Dict[str, Any]]:
     rows = []
     for g, cs in sorted(by_group.items()):
         row = {"mode": g[0], "variant": g[1] or "-", "n_direction": len(cs)}
+        ece = 0.0
         for lo, hi in BINS:
             b = [c for c in cs if lo <= c["confidence"] < hi]
             row[_label(lo, hi)] = f"{sum(c['direction_hit'] for c in b) / len(b):.2f} ({len(b)})" if b else "-"
-        # expected calibration error of "confidence = probability the predicted direction is right"
-        row["ece"] = round(sum(abs(c["direction_hit"] - c["confidence"]) for c in cs) / len(cs), 3) if cs else None
+            if b:  # expected calibration error: |accuracy - mean confidence| per bin, weighted by bin size
+                ece += len(b) / len(cs) * abs(sum(c["direction_hit"] for c in b) / len(b)
+                                               - sum(c["confidence"] for c in b) / len(b))
+        row["ece"] = round(ece, 3) if cs else None
         rows.append(row)
     return rows
 
