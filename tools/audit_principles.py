@@ -147,7 +147,7 @@ def main() -> None:
     scores = mean_table(table)
     rows = [r for d in sorted(glob.glob(a.runs)) if os.path.isdir(d) for r in audit_run(d, scores, a.noise, n_seeds)]
     text = (f"{len(rows)} distinct claims from {len({r['run'] for r in rows})} runs; truth from {len(scores)} "
-            f"architectures (3-seed mean)\n\n## truth = search model on complete data\n\n"
+            f"architectures ({n_seeds}-seed mean)\n\n## truth = search model on complete data\n\n"
             f"{md(summarize(rows, 'truth'))}\n\n## truth = matched pairs (model-free)\n\n"
             f"{md(summarize(rows, 'pair_truth'))}")
     print(text)
