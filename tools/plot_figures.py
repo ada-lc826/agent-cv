@@ -267,6 +267,78 @@ def fig_ablation(res) -> str:
     return svg(left + w + 60, top + h + 46, body)
 
 
+KIND = {  # box kind -> (stroke, fill); the legend explains the encoding
+    "llm": (SLOTS[0], "#eaf2fc"), "stats": (SLOTS[2], "#e7f6f0"),
+    "memory": (SLOTS[3], "#fdf4de"), "env": (INK2, "#f3f3f1")}
+
+
+def box(x, y, w, h, kind, title, lines, dashed=False) -> List[str]:
+    stroke, fill = KIND[kind]
+    dash = " stroke-dasharray='5 4'" if dashed else ""
+    s = [f"<rect x='{x}' y='{y}' width='{w}' height='{h}' rx='8' fill='{fill}' stroke='{stroke}' "
+         f"stroke-width='1.6'{dash}/>", text(x + w / 2, y + 22, title, 13, INK, "middle", "bold")]
+    s += [text(x + w / 2, y + 42 + 16 * i, ln, 11, INK2, "middle") for i, ln in enumerate(lines)]
+    return s
+
+
+def arrow(points: List[Tuple[float, float]], label="", lx=0.0, ly=0.0, anchor="middle", dashed=False,
+          rotate=None) -> List[str]:
+    pts = " ".join(f"{x},{y}" for x, y in points)
+    dash = " stroke-dasharray='5 4'" if dashed else ""
+    s = [f"<polyline points='{pts}' fill='none' stroke='{INK2}' stroke-width='1.5'{dash} marker-end='url(#arr)'/>"]
+    if label:
+        for i, ln in enumerate(label.split("\n")):
+            s.append(text(lx, ly + 13 * i, ln, 10.5, INK, anchor, rotate=rotate))
+    return s
+
+
+def fig_framework() -> str:
+    """One search round of the hypothesis-guided framework: LLMs propose, statistics decide."""
+    W, H = 1010, 600
+    body = ["<defs><marker id='arr' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='7' markerHeight='7' "
+            f"orient='auto-start-reverse'><path d='M0,0 L10,5 L0,10 z' fill='{INK2}'/></marker></defs>",
+            text(30, 28, "One search round: the LLMs propose, the statistics decide", 14, INK, weight="bold")]
+    # boxes (grid: rows at y = 70 and 390, columns at x = 40 / 320 / 600 / 840)
+    body += box(40, 190, 210, 150, "memory", "Principle library",
+                ["if-then claim + scope", "confidence (computed)", "support / counterexamples",
+                 "confirmed > 0.75, refuted < 0.25"])
+    body += box(320, 70, 210, 112, "llm", "Design Agent (LLM)",
+                ["proposes 4 candidates:", "parent + one or two edits,", "expected gain, cited principles"])
+    body += box(600, 70, 210, 112, "stats", "Hypothesis-guided selection",
+                ["expected gain (EI, LLM prior)", "+ principle uncertainty 4c(1-c)", "+ verification value"])
+    body += box(860, 70, 120, 112, "env", "Evaluation", ["train the child", "(or read the", "score table)"])
+    body += box(600, 390, 210, 112, "stats", "Evidence model",
+                ["Bayesian linear model:", "main effects + claimed", "interactions, known noise"])
+    body += box(320, 390, 210, 112, "llm", "Reflector (LLM)",
+                ["conjectures conditional,", "falsifiable principles;", "never judges evidence"])
+    body += box(40, 440, 150, 70, "env", "Audit (offline)", ["complete benchmark"], dashed=True)
+    # data flow around the loop
+    body += arrow([(250, 230), (285, 230), (285, 126), (320, 126)], "principles,\nevidence table", 290, 196, "start")
+    body += arrow([(530, 126), (600, 126)], "4 candidates", 565, 116)
+    body += arrow([(810, 126), (860, 126)], "1 child", 835, 116)
+    body += arrow([(920, 182), (920, 446), (810, 446)], "score,\nchange vs parent", 928, 300, "start")
+    body += arrow([(705, 390), (705, 182)], "posterior:\ngain, verification", 713, 280, "start")
+    body += arrow([(600, 446), (530, 446)], "effects,\ncounter-\nexamples", 565, 464)
+    body += arrow([(320, 446), (285, 446), (285, 310), (250, 310)], "new or\nnarrowed\nclaims", 290, 360, "start")
+    body += arrow([(705, 502), (705, 560), (215, 560), (215, 340)], "confidence of every claim = P(claim holds | all trials)",
+                  460, 552)
+    # outside the loop (dashed): transfer in, audit out
+    body += arrow([(145, 140), (145, 190)], dashed=True)
+    body.append(text(145, 130, "principles learned on another dataset", 10.5, INK, "middle"))
+    body.append(text(145, 116, "transfer (optional):", 10.5, INK2, "middle"))
+    body += arrow([(115, 340), (115, 440)], "verdicts", 121, 395, "start", dashed=True)
+    # legend
+    lx, ly = 330, 560 + 26
+    for i, (kind, lab) in enumerate((("llm", "LLM: proposes"), ("stats", "statistics: decides"),
+                                     ("memory", "shared state"), ("env", "training / benchmark"))):
+        stroke, fill = KIND[kind]
+        x = lx + i * 165
+        body.append(f"<rect x='{x}' y='{ly - 10}' width='16' height='12' rx='3' fill='{fill}' stroke='{stroke}' "
+                    f"stroke-width='1.4'/>")
+        body.append(text(x + 22, ly, lab, 11, INK2))
+    return svg(W, H + 20, body)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", required=True)
@@ -275,7 +347,7 @@ def main() -> None:
     curves: Dict = json.load(open(os.path.join(a.data, "curves.json"), encoding="utf-8"))
     res: Dict = json.load(open(os.path.join(a.data, "results.json"), encoding="utf-8"))
     os.makedirs(a.out, exist_ok=True)
-    figs = {"fig1_search_curves": fig_search(curves), "fig2_transfer": fig_transfer(curves),
+    figs = {"fig0_framework": fig_framework(), "fig1_search_curves": fig_search(curves), "fig2_transfer": fig_transfer(curves),
             "fig3_calibration": fig_calibration(res), "fig4_audit": fig_audit(res), "fig5_ablation": fig_ablation(res)}
     for name, s in figs.items():
         with open(os.path.join(a.out, name + ".svg"), "w", encoding="utf-8") as f:
