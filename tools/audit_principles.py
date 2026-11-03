@@ -9,6 +9,8 @@ data and the search's verdicts (confirmed > 0.75 / refuted < 0.25, from a few tr
   truth (pairs)  model-free: mean score difference over every matched pair (condition vs reference,
                  all other dimensions equal) in the table; holds / fails when the mean clears / misses the
                  claim's threshold by more than 1.64 standard errors.
+  truth (local)  the same, but only for pairs anchored at architectures the search evaluated (2026-11-03):
+                 does the claim hold where the search was? (large spaces have strong interactions)
 
 Per group (mode, variant), over the distinct claims of each run:
   false confirmation rate  confirmed by the search, but the truth says the claim fails
@@ -62,18 +64,44 @@ def pair_truth(claim: Dict[str, Any], scores: Dict[str, float], noise: float) ->
         b = architecture_signature(canonicalize({**a, **ref}))
         if b != s and b in scores:
             diffs.append(v - scores[b])
+    mu, verdict = _verdict(diffs, claim, noise)
+    return {"pairs": len(diffs), "pair_effect": mu, "pair_truth": verdict}
+
+
+def _verdict(diffs: List[float], claim: Dict[str, Any], noise: float):
+    """Mean matched-pair difference and whether it clears / misses the claim's threshold by > 1.64 se."""
     if not diffs:
-        return {"pairs": 0, "pair_effect": None, "pair_truth": "unclear"}
+        return None, "unclear"
     mu = statistics.mean(diffs)
     se = (statistics.stdev(diffs) / math.sqrt(len(diffs))) if len(diffs) > 1 else noise
     se = max(se, noise / math.sqrt(len(diffs)))
     m = float(claim.get("min_effect", 0.0))
     margin = (mu - m) if claim["direction"] == "increase" else (-m - mu)
-    verdict = "holds" if margin > 1.64 * se else "fails" if margin < -1.64 * se else "unclear"
-    return {"pairs": len(diffs), "pair_effect": round(mu, 3), "pair_truth": verdict}
+    return round(mu, 3), "holds" if margin > 1.64 * se else "fails" if margin < -1.64 * se else "unclear"
 
 
-def audit_run(run_dir: str, scores: Dict[str, float], noise: float, n_seeds: int) -> List[Dict[str, Any]]:
+def local_truth(claim: Dict[str, Any], scores: Dict[str, float], noise: float, contexts: List[str]) -> Dict[str, Any]:
+    """Matched pairs only in the contexts the search itself evaluated (2026-11-03). A large space has strong
+    interactions, so a claim induced near the good cells may hold there and not on average over the whole
+    space; this asks whether it holds where the search was. Every evaluated architecture that satisfies the
+    condition (or the reference) is paired with its counterpart; both scores come from the complete table."""
+    cond = _terms(claim["condition"])
+    given = dict(_terms(claim.get("reference")))
+    ref = {d: given.get(d, BASELINE[d]) for d, _ in cond}
+    pairs = set()
+    for s in contexts:
+        a = from_signature(s)
+        if all(a[d] == v for d, v in cond):
+            pairs.add((s, architecture_signature(canonicalize({**a, **ref}))))
+        elif all(a[d] == v for d, v in ref.items()):
+            pairs.add((architecture_signature(canonicalize({**a, **dict(cond)})), s))
+    diffs = [scores[c] - scores[r] for c, r in pairs if c != r and c in scores and r in scores]
+    mu, verdict = _verdict(diffs, claim, noise)
+    return {"local_pairs": len(diffs), "local_effect": mu, "local_truth": verdict}
+
+
+def audit_run(run_dir: str, scores: Dict[str, float], noise: float, n_seeds: int,
+              use_model: bool = True) -> List[Dict[str, Any]]:
     try:
         principles = json.load(open(os.path.join(run_dir, "principle_memory.json"), encoding="utf-8"))
         summary = json.load(open(os.path.join(run_dir, "search_summary.json"), encoding="utf-8"))
@@ -82,11 +110,14 @@ def audit_run(run_dir: str, scores: Dict[str, float], noise: float, n_seeds: int
     claims = [p for p in principles if p.get("claim")]
     if not claims:
         return []
+    trials = json.load(open(os.path.join(run_dir, "trial_memory.json"), encoding="utf-8"))
     base_sig = architecture_signature(BASELINE)
+    contexts = sorted({architecture_signature(canonicalize(t["architecture"])) for t in trials
+                       if t.get("status") == "ok"} | {base_sig})
     rows = [{"architecture": from_signature(s), "status": "ok", "score": v} for s, v in scores.items() if s != base_sig]
     sd = noise / math.sqrt(n_seeds)
     model = fit(rows, {"architecture": dict(BASELINE), "status": "ok", "score": scores[base_sig]}, TASK, sd,
-                claims=[p["claim"] for p in claims])
+                claims=[p["claim"] for p in claims]) if use_model else None
     out, seen = [], set()
     for p in sorted(claims, key=lambda p: -p.get("confidence", 0.5)):
         try:
@@ -96,12 +127,12 @@ def audit_run(run_dir: str, scores: Dict[str, float], noise: float, n_seeds: int
         if key in seen:
             continue
         seen.add(key)
-        c = model.confidence(p["claim"])["confidence"]
-        truth = "holds" if c > 0.75 else "fails" if c < 0.25 else "unclear"
+        c = model.confidence(p["claim"])["confidence"] if model else None
+        truth = "unclear" if c is None else "holds" if c > 0.75 else "fails" if c < 0.25 else "unclear"
         out.append({"run": os.path.basename(run_dir), "mode": summary["mode"], "variant": summary.get("variant", ""),
                     "claim": claim_text(p["claim"]), "status": p.get("status", ""),
-                    "search_conf": round(p.get("confidence", 0.5), 3), "truth_conf": round(c, 3), "truth": truth,
-                    **pair_truth(p["claim"], scores, sd)})
+                    "search_conf": round(p.get("confidence", 0.5), 3), "truth_conf": None if c is None else round(c, 3), "truth": truth,
+                    **pair_truth(p["claim"], scores, sd), **local_truth(p["claim"], scores, sd, contexts)})
     return out
 
 
@@ -141,6 +172,8 @@ def main() -> None:
     p.add_argument("--score_table", required=True)
     p.add_argument("--noise", type=float, default=0.25, help="seed noise of one training (nb201: the config's noise_level)")
     p.add_argument("--task", default="classification", help="classification or nb201_<dataset> (2026-10-30)")
+    p.add_argument("--no_model", action="store_true",
+                   help="skip the model truth (slow on NAS-Bench-201: one fit on all 15,625 cells per run)")
     p.add_argument("--out", default="")
     a = p.parse_args()
     global TASK
@@ -149,11 +182,13 @@ def main() -> None:
     table = json.load(open(a.score_table, encoding="utf-8"))
     n_seeds = len(table["seeds"])
     scores = mean_table(table)
-    rows = [r for d in sorted(glob.glob(a.runs)) if os.path.isdir(d) for r in audit_run(d, scores, a.noise, n_seeds)]
+    rows = [r for d in sorted(glob.glob(a.runs)) if os.path.isdir(d) for r in audit_run(d, scores, a.noise, n_seeds, not a.no_model)]
     text = (f"{len(rows)} distinct claims from {len({r['run'] for r in rows})} runs; truth from {len(scores)} "
-            f"architectures ({n_seeds}-seed mean)\n\n## truth = search model on complete data\n\n"
-            f"{md(summarize(rows, 'truth'))}\n\n## truth = matched pairs (model-free)\n\n"
-            f"{md(summarize(rows, 'pair_truth'))}")
+            f"architectures ({n_seeds}-seed mean)\n\n"
+            + ("" if a.no_model else f"## truth = search model on complete data\n\n{md(summarize(rows, 'truth'))}\n\n")
+            + f"## truth = matched pairs over the whole space (model-free)\n\n{md(summarize(rows, 'pair_truth'))}\n\n"
+            f"## truth = matched pairs in the contexts the search evaluated (local)\n\n"
+            f"{md(summarize(rows, 'local_truth'))}")
     print(text)
     if a.out:
         os.makedirs(a.out, exist_ok=True)
