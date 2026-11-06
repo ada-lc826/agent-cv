@@ -1,0 +1,8 @@
+none__standard__none__late
+eca__dilated__none__early
+eca__depthwise__weighted__late
+none__dilated__none__late
+eca__dilated__weighted__late
+cbam__standard__none__all
+eca__dilated__none__all
+se__depthwise__none__all

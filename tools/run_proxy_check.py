@@ -49,6 +49,9 @@ def main() -> None:
     p.add_argument("--proxy_epochs", type=int, default=0,
                    help="override the proxy length (e.g. 60); results go to proxy_e<N>/ and scores_e<N>.csv, "
                         "full-training results are shared")
+    p.add_argument("--proxy_iters", type=int, default=0,
+                   help="segmentation: override the proxy length in iterations; results go to proxy_i<N>/ and "
+                        "scores_i<N>.csv, full-training results are shared")
     p.add_argument("--out", default="runs/proxy_check")
     a = p.parse_args()
 
@@ -57,13 +60,16 @@ def main() -> None:
     if a.proxy_epochs:
         rc = {**rc, "epochs": a.proxy_epochs}
         proxy_dir, tag = f"proxy_e{a.proxy_epochs}", f"_e{a.proxy_epochs}"
+    if a.proxy_iters:
+        rc = {**rc, "iters": a.proxy_iters}
+        proxy_dir, tag = f"proxy_i{a.proxy_iters}", f"_i{a.proxy_iters}"
     sigs = [s.strip() for s in open(a.archs, encoding="utf-8") if s.strip() and "__" in s]
     if a.only:
         sigs = sigs[: a.only]
     schedules = ["proxy", "full"] if a.schedule == "both" else [a.schedule]
     if a.task == "segmentation":  # 2026-11-06: same check for DeepLabV3+ (proxy = rc["iters"] iterations)
         runners = {
-            "proxy": make_runner(a.task, rc, seed=a.seed, schedule="proxy", work_root=os.path.join(a.out, "proxy")),
+            "proxy": make_runner(a.task, rc, seed=a.seed, schedule="proxy", work_root=os.path.join(a.out, proxy_dir)),
             "full": make_runner(a.task, rc, seed=a.seed, schedule="official", amp=a.full_amp or rc.get("amp"),
                                 timeout_s=48 * 3600, work_root=os.path.join(a.out, "full")),
         }
