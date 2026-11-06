@@ -48,11 +48,20 @@ class MMPretrainRunnerConfig:
 
 class MMPretrainRunner(BaseRunner):
     metric = "top1"
+    # what a runner for another OpenMMLab framework overrides (MMSegRunner, 2026-11-06)
+    PLUGIN = "visionevoagent.plugins.mmpretrain_evo"   # module that registers the Evo* classes
+    SCOPE = "mmpretrain"                                # registry scope / package name
+    METRIC_KEY = "accuracy/top1"                        # key in vis_data/scalars.json
 
     def __init__(self, cfg: MMPretrainRunnerConfig):
         self.cfg = cfg
         self.cfg.mmpretrain_root = os.path.abspath(os.path.expanduser(cfg.mmpretrain_root))
         self.cfg.work_root = os.path.abspath(os.path.expanduser(cfg.work_root))
+
+    @property
+    def root(self) -> str:
+        """Checkout of the training framework (contains tools/train.py)."""
+        return self.cfg.mmpretrain_root
 
     # ------------------------------------------------------------------
     def build_config(self, arch: Architecture) -> str:
@@ -111,7 +120,7 @@ class MMPretrainRunner(BaseRunner):
 
     def _env(self) -> Dict[str, str]:
         env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(p for p in (PKG_ROOT, self.cfg.mmpretrain_root,
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (PKG_ROOT, self.root,
                                                         env.get("PYTHONPATH", "")) if p)
         env.pop("MPLBACKEND", None)
         if self.cfg.device == "cpu":
@@ -149,12 +158,12 @@ class MMPretrainRunner(BaseRunner):
         except Exception as e:  # noqa: BLE001 -- runner must never raise
             log.warning("model build failed: %s", str(e)[-1000:])
             return TrialResult("failed", failure_reason="build_error")
-        cmd = [self.cfg.python, os.path.join(self.cfg.mmpretrain_root, "tools", "train.py"), cfg_path,
+        cmd = [self.cfg.python, os.path.join(self.root, "tools", "train.py"), cfg_path,
                "--work-dir", work_dir]
         log_path = os.path.join(work_dir, "train_stdout.log")
         try:
             with open(log_path, "w", encoding="utf-8") as out:
-                proc = subprocess.run(cmd, cwd=self.cfg.mmpretrain_root, env=self._env(), stdout=out,
+                proc = subprocess.run(cmd, cwd=self.root, env=self._env(), stdout=out,
                                       stderr=subprocess.STDOUT, timeout=self.cfg.timeout_s)
         except subprocess.TimeoutExpired:
             return TrialResult("failed", params=params, failure_reason="timeout")
@@ -165,7 +174,7 @@ class MMPretrainRunner(BaseRunner):
             low = tail.lower()
             reason = "oom" if "out of memory" in low else ("nan" if "nan" in low and "loss" in low else "crash")
             return TrialResult("failed", params=params, failure_reason=reason)
-        score = parse_top1(work_dir)
+        score = parse_metric(work_dir, self.METRIC_KEY)
         if score is None:
             return TrialResult("failed", params=params, failure_reason="missing_result")
         if score != score:  # NaN
@@ -174,20 +183,23 @@ class MMPretrainRunner(BaseRunner):
 
     def count_params(self, cfg_path: str) -> float:
         """Build the model in a subprocess (same env as training) and return parameters in millions."""
-        code = ("import sys, json\n"
-                "from mmengine.config import Config\n"
-                "from mmengine.registry import init_default_scope\n"
-                "import visionevoagent.plugins.mmpretrain_evo\n"
-                "from mmpretrain.registry import MODELS\n"
-                "init_default_scope('mmpretrain')\n"
-                "m = MODELS.build(Config.fromfile(sys.argv[1]).model)\n"
+        code = (self._build_prelude()
+                + "m = MODELS.build(Config.fromfile(sys.argv[1]).model)\n"
                 "print(json.dumps({'params': sum(p.numel() for p in m.parameters()) / 1e6}))\n")
-        p = subprocess.run([self.cfg.python, "-c", code, cfg_path], cwd=self.cfg.mmpretrain_root,
+        p = subprocess.run([self.cfg.python, "-c", code, cfg_path], cwd=self.root,
                            env=self._env(), capture_output=True, text=True, timeout=600)
         if p.returncode != 0:
             raise RuntimeError(p.stderr[-2000:])
         return round(json.loads(p.stdout.strip().splitlines()[-1])["params"], 3)
 
+    def _build_prelude(self) -> str:
+        """Python source that imports the plugin and the framework's model registry (for counting)."""
+        return ("import sys, json\n"
+                "from mmengine.config import Config\n"
+                "from mmengine.registry import init_default_scope\n"
+                f"import {self.PLUGIN}\n"
+                f"from {self.SCOPE}.registry import MODELS\n"
+                f"init_default_scope({self.SCOPE!r})\n")
 
     def param_table(self, task: str) -> Optional[Dict[str, float]]:
         """Build every architecture once (one subprocess, CPU) and cache the counts in
@@ -204,13 +216,8 @@ class MMPretrainRunner(BaseRunner):
             paths[sig] = os.path.join(cfg_dir, f"{sig}.py")
             with open(paths[sig], "w", encoding="utf-8") as f:
                 f.write(self.build_config(a))
-        code = ("import sys, json\n"
-                "from mmengine.config import Config\n"
-                "from mmengine.registry import init_default_scope\n"
-                "import visionevoagent.plugins.mmpretrain_evo\n"
-                "from mmpretrain.registry import MODELS\n"
-                "init_default_scope('mmpretrain')\n"
-                "out = {}\n"
+        code = (self._build_prelude()
+                + "out = {}\n"
                 "for sig, path in json.loads(sys.argv[1]).items():\n"
                 "    m = MODELS.build(Config.fromfile(path).model)\n"
                 "    out[sig] = round(sum(p.numel() for p in m.parameters()) / 1e6, 3)\n"
@@ -218,7 +225,7 @@ class MMPretrainRunner(BaseRunner):
         env = self._env()
         env["CUDA_VISIBLE_DEVICES"] = ""  # counting only; never take a GPU from a running trial
         try:
-            p = subprocess.run([self.cfg.python, "-c", code, json.dumps(paths)], cwd=self.cfg.mmpretrain_root,
+            p = subprocess.run([self.cfg.python, "-c", code, json.dumps(paths)], cwd=self.root,
                                env=env, capture_output=True, text=True, timeout=1800)
             if p.returncode != 0:
                 raise RuntimeError(p.stderr[-2000:])
@@ -232,7 +239,11 @@ class MMPretrainRunner(BaseRunner):
 
 
 def parse_top1(work_dir: str) -> Optional[float]:
-    """Last accuracy/top1 written by mmengine to <work_dir>/<timestamp>/vis_data/scalars.json."""
+    return parse_metric(work_dir, "accuracy/top1")
+
+
+def parse_metric(work_dir: str, key: str) -> Optional[float]:
+    """Last value of `key` written by mmengine to <work_dir>/<timestamp>/vis_data/scalars.json."""
     best: Optional[float] = None
     stamps = sorted(d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)))
     for d in stamps:
@@ -245,8 +256,8 @@ def parse_top1(work_dir: str) -> Optional[float]:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if "accuracy/top1" in rec:
-                    best = float(rec["accuracy/top1"])
+                if key in rec:
+                    best = float(rec[key])
     return best
 
 

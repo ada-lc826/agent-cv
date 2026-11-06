@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml  # noqa: E402
 
+from visionevoagent.runners.factory import make_runner  # noqa: E402
 from visionevoagent.runners.mmpretrain_runner import MMPretrainRunner, MMPretrainRunnerConfig  # noqa: E402
 from visionevoagent.search_space import from_signature  # noqa: E402
 
@@ -37,6 +38,7 @@ from visionevoagent.search_space import from_signature  # noqa: E402
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True)
+    p.add_argument("--task", default="classification", choices=("classification", "segmentation"))
     p.add_argument("--archs", required=True, help="one signature per line (tools/proxy_reliability.py sample)")
     p.add_argument("--schedule", choices=("proxy", "full", "both"), default="both")
     p.add_argument("--jobs", type=int, default=1, help="trainings running at the same time on the GPU")
@@ -59,13 +61,20 @@ def main() -> None:
     if a.only:
         sigs = sigs[: a.only]
     schedules = ["proxy", "full"] if a.schedule == "both" else [a.schedule]
-    runners = {
-        "proxy": MMPretrainRunner(MMPretrainRunnerConfig(**{**rc, "seed": a.seed, "schedule": "proxy",
-                                                            "work_root": os.path.join(a.out, proxy_dir)})),
-        "full": MMPretrainRunner(MMPretrainRunnerConfig(**{**rc, "seed": a.seed, "schedule": "official",
-                                                           "amp": a.full_amp, "timeout_s": 24 * 3600,
-                                                           "work_root": os.path.join(a.out, "full")})),
-    }
+    if a.task == "segmentation":  # 2026-11-06: same check for DeepLabV3+ (proxy = rc["iters"] iterations)
+        runners = {
+            "proxy": make_runner(a.task, rc, seed=a.seed, schedule="proxy", work_root=os.path.join(a.out, "proxy")),
+            "full": make_runner(a.task, rc, seed=a.seed, schedule="official", amp=a.full_amp or rc.get("amp"),
+                                timeout_s=48 * 3600, work_root=os.path.join(a.out, "full")),
+        }
+    else:
+        runners = {
+            "proxy": MMPretrainRunner(MMPretrainRunnerConfig(**{**rc, "seed": a.seed, "schedule": "proxy",
+                                                                "work_root": os.path.join(a.out, proxy_dir)})),
+            "full": MMPretrainRunner(MMPretrainRunnerConfig(**{**rc, "seed": a.seed, "schedule": "official",
+                                                               "amp": a.full_amp, "timeout_s": 24 * 3600,
+                                                               "work_root": os.path.join(a.out, "full")})),
+        }
     jobs = [(s, sch) for sch in schedules for s in sigs]  # all proxies first: they finish early
 
     def run(job):

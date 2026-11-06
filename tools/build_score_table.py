@@ -29,11 +29,13 @@ import yaml  # noqa: E402
 
 from visionevoagent.search_space import all_architectures, architecture_signature, from_signature  # noqa: E402
 
-TASK = "classification"
+TASK = "classification"  # set from --task in main()
 
 
 def _meta(rc: dict) -> dict:
-    keys = ("base_config", "schedule", "epochs", "warmup_epochs", "batch_size", "lr", "amp")
+    # the classification keys are unchanged so that the existing table still validates
+    keys = (("base_config", "schedule", "iters", "batch_size", "amp") if TASK == "segmentation" else
+            ("base_config", "schedule", "epochs", "warmup_epochs", "batch_size", "lr", "amp"))
     return {k: rc.get(k) for k in keys}
 
 
@@ -91,6 +93,7 @@ def import_results(patterns, seed_epochs: int, amp: bool, table: dict) -> int:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config")
+    p.add_argument("--task", default="classification", choices=("classification", "segmentation"))
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--jobs", type=int, default=4, help="trainings running at the same time on the GPU")
     p.add_argument("--import", dest="imports", action="append", default=[],
@@ -99,6 +102,8 @@ def main() -> None:
     p.add_argument("--merge", nargs="+", help="score_table.json files to merge into --out (no training)")
     p.add_argument("--out", default="runs/score_table")
     a = p.parse_args()
+    global TASK
+    TASK = a.task
 
     if a.merge:
         tables = [json.load(open(f, encoding="utf-8")) for f in a.merge]
@@ -118,11 +123,13 @@ def main() -> None:
                   f"{sum(r['status'] != 'ok' for r in rows.values())} failed, of {len(all_architectures(TASK))}")
         return
 
-    from visionevoagent.runners.mmpretrain_runner import MMPretrainRunner, MMPretrainRunnerConfig
+    from visionevoagent.runners.factory import make_runner
     rc = (yaml.safe_load(open(a.config, encoding="utf-8")) or {}).get("runner", {})
     rc = {**rc, "schedule": "proxy"}
     meta = _meta(rc)
     table = _load(a.out, meta)
+    if a.imports and TASK != "classification":
+        raise SystemExit("--import only understands classification trial configs")
     if a.imports:
         print(f"imported {import_results(a.imports, rc['epochs'], rc.get('amp', False), table)} results")
         _save(table, a.out)
@@ -135,8 +142,7 @@ def main() -> None:
         missing = [s for s in sigs if rows.get(s, {}).get("status") != "ok"]
         jobs += [(seed, s) for k, s in enumerate(missing) if k % n == i - 1]
     print(f"{len(jobs)} trainings to run (shard {a.shard})", flush=True)
-    runners = {seed: MMPretrainRunner(MMPretrainRunnerConfig(**{**rc, "seed": seed,
-                                                               "work_root": os.path.join(a.out, f"seed{seed}")}))
+    runners = {seed: make_runner(TASK, rc, seed=seed, work_root=os.path.join(a.out, f"seed{seed}"))
                for seed in a.seeds}
     lock = threading.Lock()
 

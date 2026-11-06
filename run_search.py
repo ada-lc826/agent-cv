@@ -211,10 +211,8 @@ def main(argv=None) -> int:
         from visionevoagent.runners.table_runner import TableRunner
         runner = TableRunner(a.score_table, a.seed if a.table_seed is None else a.table_seed)
     else:
-        from visionevoagent.runners.mmpretrain_runner import MMPretrainRunner, MMPretrainRunnerConfig
-        rc = MMPretrainRunnerConfig(**{**yr, "seed": a.seed,
-                                       "work_root": yr.get("work_root") or os.path.join(run_dir, "trials")})
-        runner = MMPretrainRunner(rc)
+        from visionevoagent.runners.factory import make_runner
+        runner = make_runner(a.task, yr, seed=a.seed, work_root=yr.get("work_root") or os.path.join(run_dir, "trials"))
 
     # ---- controller ----
     m = a.mode

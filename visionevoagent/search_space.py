@@ -30,6 +30,13 @@ SEARCH_SPACES: Dict[str, Dict[str, List[str]]] = {
         "fusion": ["none", "weighted"],
         "target_stage": ["early", "late", "all"],
     },
+    # same module space on DeepLabV3+ R-50-D8 / Cityscapes, for cross-task transfer (2026-11-06)
+    "segmentation": {
+        "attention": ["none", "se", "eca", "cbam", "coordatt"],
+        "conv": ["standard", "dilated", "depthwise"],
+        "fusion": ["none", "weighted"],
+        "target_stage": ["early", "late", "all"],
+    },
     "nb201_cifar10": _NB201_SPACE,
     "nb201_cifar100": _NB201_SPACE,
     "nb201_imagenet16": _NB201_SPACE,
