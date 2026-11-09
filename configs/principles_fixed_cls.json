@@ -1,0 +1,38 @@
+[
+  {"task": "classification", "fields": {
+    "if": "a channel attention module (se or eca) is added after the last norm of each bottleneck",
+    "scope": "ResNet-style classification backbone, late stages (3-4)",
+    "then": "top-1 rises by about 0.5 to 1.0 points at almost no extra cost for eca and a few percent more parameters for se",
+    "because": "channel reweighting lets the high-level features suppress uninformative channels (SENet, ECA-Net)",
+    "disproved_if": "adding se or eca at the late stages leaves top-1 within the noise level or lowers it"}},
+  {"task": "classification", "fields": {
+    "if": "attention is inserted at the early stages (1-2) instead of the late stages",
+    "scope": "ResNet-style classification backbone with the same attention module",
+    "then": "the gain is smaller than with late-stage placement",
+    "because": "early features are generic edges and textures where channel selection carries little class information",
+    "disproved_if": "early placement beats late placement by more than the noise level"}},
+  {"task": "classification", "fields": {
+    "if": "the 3x3 convolutions are replaced by depthwise-separable convolutions",
+    "scope": "bottleneck blocks of a ResNet-50-size classifier",
+    "then": "parameters drop by roughly a quarter or more and top-1 falls by about 0.5 to 1.5 points",
+    "because": "depthwise convolutions remove cross-channel mixing inside the 3x3 stage and reduce capacity",
+    "disproved_if": "the depthwise variant matches the standard convolution within the noise level"}},
+  {"task": "classification", "fields": {
+    "if": "the 3x3 convolutions of the late stages use dilation 2",
+    "scope": "low-resolution inputs (32x32), late stages whose feature maps are 8x8 or smaller",
+    "then": "top-1 changes by less than the noise level",
+    "because": "at these resolutions a dilated kernel mostly samples padding and adds little useful context",
+    "disproved_if": "late-stage dilation changes top-1 by more than the noise level in either direction"}},
+  {"task": "classification", "fields": {
+    "if": "spatial attention (cbam or coordatt) is used instead of pure channel attention",
+    "scope": "ResNet-style classifier on small images",
+    "then": "the result is no better than se or eca",
+    "because": "small feature maps leave little spatial structure for the extra spatial branch to exploit",
+    "disproved_if": "cbam or coordatt beats the better of se and eca by more than the noise level"}},
+  {"task": "classification", "fields": {
+    "if": "the pooled features of the last two stages are fused with learnable weights",
+    "scope": "classification neck replacing plain global average pooling",
+    "then": "top-1 rises slightly, by up to about 0.5 points",
+    "because": "stage-3 features add mid-level cues that the final stage may have discarded",
+    "disproved_if": "weighted fusion lowers top-1 by more than the noise level"}}
+]

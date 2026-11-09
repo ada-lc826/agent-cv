@@ -6,6 +6,19 @@ from typing import Any, Dict, List, Optional
 
 from .search_space import DIMENSIONS, get_search_space
 
+# Same for every LLM method, ours included (decision 2026-10-13): one ask plus at most 2 re-asks with
+# the rejection reason as feedback; after that the round falls back to a random untried architecture.
+MAX_PROPOSAL_ATTEMPTS = 3
+
+
+def attempt_outcome(reason: Optional[str]) -> str:
+    """Category of one proposed architecture, for the duplicate-rate statistics: ok | duplicate | invalid."""
+    if reason is None:
+        return "ok"
+    if "already evaluated" in reason or "known failed configuration" in reason:
+        return "duplicate"
+    return "invalid"
+
 EVIDENCE_TYPES = ["supports", "contradicts", "neutral"]
 PRINCIPLE_FIELDS = ["if", "scope", "then", "because", "disproved_if"]
 MAX_NEW_PRINCIPLES = 3
@@ -28,6 +41,41 @@ def design_schema(task: str, with_citations: bool = False) -> Dict[str, Any]:
         props["cited_principles"] = {"type": "array", "items": {"type": "string"}}
         required.append("cited_principles")
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
+
+
+def candidates_schema(task: str) -> Dict[str, Any]:
+    """Hypothesis-guided framework: the Design Agent proposes several candidates, each with its parent
+    (a tried architecture's signature) and an explicit expected improvement over that parent."""
+    space = get_search_space(task)
+    item = {
+        "type": "object",
+        "properties": {
+            "parent": {"type": "string"},
+            "architecture": {"type": "object",
+                             "properties": {d: {"type": "string", "enum": space[d]} for d in DIMENSIONS},
+                             "required": list(DIMENSIONS), "additionalProperties": False},
+            "expected_improvement": {"type": "number"},   # predicted score change vs the parent (metric points)
+            "rationale": {"type": "string"},
+            "cited_principles": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["parent", "architecture", "expected_improvement", "rationale", "cited_principles"],
+        "additionalProperties": False,
+    }
+    return {"type": "object", "properties": {"candidates": {"type": "array", "items": item}},
+            "required": ["candidates"], "additionalProperties": False}
+
+
+def validate_candidate(obj: Any, task: str) -> Optional[str]:
+    """Shape of one candidate (the rules -- parent tried, candidate untried, budget -- are the agent's)."""
+    if not isinstance(obj, dict):
+        return "candidate is not an object"
+    if not isinstance(obj.get("parent"), str):
+        return "candidate has no parent signature"
+    if not isinstance(obj.get("expected_improvement"), (int, float)):
+        return "candidate has no numeric expected_improvement"
+    reason = validate_design({"architecture": obj.get("architecture"), "rationale": obj.get("rationale"),
+                              "cited_principles": obj.get("cited_principles", [])}, task)
+    return reason
 
 
 _PATTERN = {
@@ -78,6 +126,58 @@ REFLECTION_SCHEMA: Dict[str, Any] = {
 }
 
 
+MAX_HYPOTHESES = 3
+
+
+def _claim_schema(task: str) -> Dict[str, Any]:
+    space = get_search_space(task)
+    term = {"type": "object",
+            "properties": {"dim": {"type": "string", "enum": list(DIMENSIONS)},
+                           "value": {"type": "string", "enum": sorted({v for d in DIMENSIONS for v in space[d]})}},
+            "required": ["dim", "value"], "additionalProperties": False}
+    return {"type": "object",
+            "properties": {"condition": {"type": "array", "items": term},
+                           "reference": {"type": "array", "items": term},
+                           "direction": {"type": "string", "enum": ["increase", "decrease"]},
+                           "min_effect": {"type": "number"}},
+            "required": ["condition", "reference", "direction", "min_effect"], "additionalProperties": False}
+
+
+def reflection_schema(task: str, with_hypotheses: bool = False, computed_evidence: bool = False) -> Dict[str, Any]:
+    """v1: REFLECTION_SCHEMA. v2 (with_hypotheses): the Reflector must also propose 1-3 untested
+    architectures ("untested_combinations") that test its principles or combine promising changes.
+    v3 (computed_evidence): no principle_updates (the system computes confidence from the trials); every
+    new principle carries a machine-checkable `claim`; every hypothesis a `predicted_delta`."""
+    if not with_hypotheses and not computed_evidence:
+        return REFLECTION_SCHEMA
+    space = get_search_space(task)
+    props = dict(REFLECTION_SCHEMA["properties"])
+    required = list(REFLECTION_SCHEMA["required"])
+    if with_hypotheses:
+        hyp_props: Dict[str, Any] = {
+            "architecture": {"type": "object",
+                             "properties": {d: {"type": "string", "enum": space[d]} for d in DIMENSIONS},
+                             "required": list(DIMENSIONS), "additionalProperties": False},
+            "rationale": {"type": "string"},
+            "principle_ids": {"type": "array", "items": {"type": "string"}},
+        }
+        hyp_req = ["architecture", "rationale", "principle_ids"]
+        if computed_evidence:
+            hyp_props["predicted_delta"] = {"type": "number"}   # predicted score delta vs the baseline
+            hyp_req.append("predicted_delta")
+        props["untested_combinations"] = {"type": "array", "items": {
+            "type": "object", "properties": hyp_props, "required": hyp_req, "additionalProperties": False}}
+        required.append("untested_combinations")
+    if computed_evidence:
+        props.pop("principle_updates")
+        required.remove("principle_updates")
+        props["new_principles"] = {"type": "array", "items": {
+            "type": "object",
+            "properties": {**_NEW_PRINCIPLE["properties"], "claim": _claim_schema(task)},
+            "required": list(PRINCIPLE_FIELDS) + ["claim"], "additionalProperties": False}}
+    return {**REFLECTION_SCHEMA, "properties": props, "required": required}
+
+
 def _err(msg: str) -> Optional[str]:
     return msg
 
@@ -102,9 +202,35 @@ def validate_design(obj: Any, task: str) -> Optional[str]:
     return None
 
 
-def validate_reflection(obj: Any) -> Optional[str]:
+def validate_reflection(obj: Any, task: str = "", with_hypotheses: bool = False,
+                        computed_evidence: bool = False) -> Optional[str]:
     if not isinstance(obj, dict):
         return _err("response is not an object")
+    if computed_evidence:  # v3: evidence is computed by the system; the field is not asked for
+        obj.setdefault("principle_updates", [])
+        from .evidence import validate_claim
+        # a principle whose claim cannot be checked is dropped (and recorded), not the whole reflection
+        keep, dropped = [], []
+        for p in obj.get("new_principles") or []:
+            bad = validate_claim(p.get("claim") if isinstance(p, dict) else None, task)
+            (dropped if bad else keep).append({"principle": p, "reason": bad} if bad else p)
+        if isinstance(obj.get("new_principles"), list):
+            obj["new_principles"] = keep
+            if dropped:
+                obj["dropped_principles"] = dropped
+        if with_hypotheses:
+            for h in obj.get("untested_combinations") or []:
+                if not isinstance(h, dict) or not isinstance(h.get("predicted_delta"), (int, float)):
+                    return _err("every untested combination needs a numeric predicted_delta")
+    if with_hypotheses:
+        hyps = obj.get("untested_combinations")
+        if not isinstance(hyps, list) or not 1 <= len(hyps) <= MAX_HYPOTHESES:
+            return _err(f"untested_combinations must list 1-{MAX_HYPOTHESES} architectures")
+        space = get_search_space(task)
+        for h in hyps:
+            arch = h.get("architecture") if isinstance(h, dict) else None
+            if not isinstance(arch, dict) or any(arch.get(d) not in space[d] for d in DIMENSIONS):
+                return _err("every untested combination needs a valid architecture from SEARCH_SPACE")
     for key in ("effective_patterns", "ineffective_patterns"):
         items = obj.get(key)
         if not isinstance(items, list):

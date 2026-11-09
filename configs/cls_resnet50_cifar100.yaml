@@ -1,9 +1,9 @@
 # CIFAR-100 ResNet-50 (MMPretrain official recipe), proxy search on 1 GPU.
 # Usage: python run_search.py --config configs/cls_resnet50_cifar100.yaml --mode agent_reflect --seed 0
 search:
-  max_rounds: 10             # same trial budget for every method (research plan; 30 for the sensitivity run)
-  min_improvement: 0.2       # >= proxy seed std; measure it first (see README) and update
-  noise_level: 0.2
+  max_rounds: 10             # pilot budget; the formal classification comparison adds --max_rounds 30
+  min_improvement: 0.25      # = measured proxy seed std (60-epoch proxy, baseline seeds 0/1/2: 78.06/77.66/78.12)
+  noise_level: 0.25
   early_stop_patience: 0     # keep 0 in method comparisons
   max_consecutive_failures: 5
 
@@ -12,14 +12,29 @@ agent:
     provider: deepseek       # needs DEEPSEEK_API_KEY (never commit it); alternative: anthropic + ANTHROPIC_API_KEY
     model: deepseek-flash    # DeepSeek V4.1 Flash (for anthropic: claude-opus-5-5)
     effort: medium           # DeepSeek reasoning_effort: low->low, medium/high->high, xhigh/max->max
-    thinking: true           # DeepSeek thinking mode (its default); false makes baseline temperatures apply
+    thinking: false          # main comparison without thinking so baseline temperatures apply (advisor);
+                             # the thinking control is a separate run: --thinking on
     use_fallbacks: true      # anthropic only: server-side refusal fallback
   search:
-    reflect_every_n: 2
+    reflect_every_n: 1       # v2: the Design Agent sees only the reflection, so reflect after every trial
     mutation_budget: 1
     stagnation_budget: 2
     stagnation_rounds: 3
     explore_every: 4
+    # reflection v2 (2026-10-20; --reflection_version v1 restores the pilot's settings)
+    design_view: reflection_only   # Design Agent: Reflector summary + tried list, no raw history
+    propose_hypotheses: false      # v2/v3 only (--reflection_version v2/v3 turns it on)
+    confidence_eta: 0.35           # v1: 0.2
+    min_evidence_strength: 0.5     # floor for supports / contradicts strength; v1: none
+    # reflection v3 (default; --reflection_version v2 = LLM-judged evidence with the two lines above)
+    evidence_mode: computed        # confidence = posterior of the claim under a Bayesian linear model
+    prior_sd: 1.0                  # main effect prior sd (top-1 points)
+    interaction_prior_sd: 0.5      # interaction terms named by 2-term claims
+    # hypothesis-guided framework (v4, 2026-10-26, advisor; default; --reflection_version v3 = the B run)
+    selection: guided              # guided | llm (ablation: the Design Agent's first candidate)
+    n_candidates: 4                # candidates per round, each with parent + expected improvement
+    n_parent_options: 5            # best tried architectures offered as parents (+ baseline)
+    llm_prior_sd: 0.75             # the Design Agent's expectation as a Gaussian prior on the model prediction
 
 # Comparison methods, scaled to the 10-trial budget (see README "Comparison methods").
 baselines:
@@ -34,7 +49,8 @@ baselines:
 runner:
   mmpretrain_root: /root/mmpretrain          # checkout with tools/train.py and data/cifar100
   base_config: configs/resnet/resnet50_8xb16_cifar100.py
-  epochs: 30
+  epochs: 60                 # proxy check 2026-10-18: 30 epochs failed (proxy's best pick was 4th in full
+                             # training), 60 epochs passed (tau 0.68, best pick 1st); see runs/proxy_check
   warmup_epochs: 1
   batch_size: 128
   lr: 0.1

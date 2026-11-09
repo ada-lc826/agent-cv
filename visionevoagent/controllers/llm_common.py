@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..memory import ArchitectureMemory, Trial
-from ..schemas import design_schema, validate_design
+from ..schemas import MAX_PROPOSAL_ATTEMPTS, attempt_outcome, design_schema, validate_design
 from ..search_space import (DIMENSIONS, MODULE_NOTES, Architecture, architecture_signature, canonicalize,
                             get_search_space, random_local_mutation)
 
@@ -43,14 +43,18 @@ def fmt_result(t: Trial, metric: str) -> str:
 
 def ask_architecture(client: AgentClient, purpose: str, system: str, prompt: Union[str, Conversation],
                      task: str, exclude: set, mock_fn: Callable[[int], Dict[str, Any]],
-                     max_attempts: int = 2, effort: Optional[str] = None, temperature: Optional[float] = None
+                     max_attempts: int = MAX_PROPOSAL_ATTEMPTS, effort: Optional[str] = None,
+                     temperature: Optional[float] = None, record: Optional[List[str]] = None
                      ) -> Tuple[Optional[Architecture], str, Union[str, Conversation]]:
     """Ask for one new architecture. Returns (architecture or None, rationale, prompt incl. feedback).
 
-    A rejected answer (illegal value, already evaluated) is retried once with feedback: for a single
-    prompt the feedback is appended to it, for a conversation it is added as an assistant/user turn pair.
+    A rejected answer (illegal value, already evaluated) is re-asked with feedback, up to max_attempts
+    answers in total: for a single prompt the feedback is appended to it, for a conversation it is added
+    as an assistant/user turn pair. The outcome of every attempt is appended to `record`
+    (ok | duplicate | invalid | call_error).
     """
     convo = prompt
+    record = record if record is not None else []
     for attempt in range(1, max_attempts + 1):
         try:
             out = client.complete_json(purpose, system, convo, design_schema(task),
@@ -59,6 +63,7 @@ def ask_architecture(client: AgentClient, purpose: str, system: str, prompt: Uni
             raise
         except AgentClientError as e:
             log.warning("%s call failed (attempt %d): %s", purpose, attempt, e)
+            record.append("call_error")
             continue
         reason = validate_design(out, task)
         arch = None
@@ -66,6 +71,7 @@ def ask_architecture(client: AgentClient, purpose: str, system: str, prompt: Uni
             arch = canonicalize(out["architecture"])
             if architecture_signature(arch) in exclude:
                 reason = f"{architecture_signature(arch)} was already evaluated"
+        record.append(attempt_outcome(reason))
         if reason is None:
             return arch, out["rationale"], convo
         log.info("%s answer rejected (attempt %d): %s", purpose, attempt, reason)

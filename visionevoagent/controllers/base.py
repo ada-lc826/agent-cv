@@ -21,6 +21,11 @@ class Proposal:
     search_mode: str = ""
     # principles the proposal relies on, snapshot at proposal time: [{"id", "confidence", "status"}]
     cited_principles: List[Dict[str, Any]] = field(default_factory=list)
+    # predictions made before training (reflection v3), stored with the trial
+    predictions: Dict[str, Any] = field(default_factory=dict)
+    # hypothesis-guided framework: parent signature and the selection record
+    parent: str = ""
+    selection: Dict[str, Any] = field(default_factory=dict)
 
 
 class BaseController(ABC):
@@ -33,6 +38,9 @@ class BaseController(ABC):
         # principles, experience stores, ...). The search engine saves it after every round to
         # controller_state.json and restores it on resume. Must stay JSON-serialisable.
         self.state: Dict[str, Any] = {}
+        # Outcome of every LLM answer behind the current proposal (ok | duplicate | invalid | call_error);
+        # cleared by the search engine before each propose() and stored with the trial.
+        self.proposal_attempts: List[str] = []
 
     @abstractmethod
     def propose(self, memory: ArchitectureMemory, round_: int) -> Proposal:

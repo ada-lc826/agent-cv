@@ -1,0 +1,54 @@
+# DeepLabV3+ R-50-D8 / Cityscapes (MMSegmentation official recipe, reproduced 80.28 mIoU), the cross-task
+# transfer target (2026-11-06). Same module space as classification (task "segmentation").
+# Usage: python run_search.py --config configs/seg_deeplabv3plus_r50_cityscapes.yaml --task segmentation \
+#            --score_table runs/score_table_seg/score_table.json --mode agent_reflect --seed 0 --max_rounds 20
+search:
+  max_rounds: 20
+  min_improvement: 0.30      # PLACEHOLDER: replace with the measured proxy seed sd (mIoU points)
+  noise_level: 0.30          # PLACEHOLDER: idem
+  early_stop_patience: 0
+  max_consecutive_failures: 5
+
+agent:
+  client:
+    provider: deepseek
+    model: deepseek-flash
+    effort: medium
+    thinking: false
+    use_fallbacks: true
+  search:
+    reflect_every_n: 1
+    mutation_budget: 1
+    stagnation_budget: 2
+    stagnation_rounds: 3
+    explore_every: 4
+    design_view: reflection_only
+    propose_hypotheses: false
+    confidence_eta: 0.35
+    min_evidence_strength: 0.5
+    evidence_mode: computed
+    prior_sd: 1.0
+    interaction_prior_sd: 0.5
+    selection: guided
+    n_candidates: 4
+    n_parent_options: 5
+    llm_prior_sd: 0.75
+
+baselines:
+  reg_evo: {population_size: 4, tournament_size: 2}
+  tpe: {n_startup_trials: 3}
+  genius: {}
+  evoprompting: {children_per_gen: 5, top_p: 4, k: 2}
+  llmatic: {p_mutation: 0.7, random_init: 2}
+  lapt: {n_init: 3, k: 2, adapt_every: 2, top_r: 2}
+  nader: {n_inspirations: 10, extract_every: 2, top_k: 5}
+
+runner:
+  mmseg_root: /root/autodl-tmp/mmsegmentation        # with data/cityscapes (trainId labels generated)
+  base_config: configs/deeplabv3plus/deeplabv3plus_r50-d8_4xb2-80k_cityscapes-512x1024.py
+  iters: 4000                # proxy check (2026-11-09): 4k and 8k rank the 8 checked architectures equally
+                             # (Spearman 0.76 vs 80k full training), 4k at half the cost
+  batch_size: 8              # total batch of the official recipe (4 GPUs x 2) on one GPU
+  amp: true
+  num_workers: 8
+  timeout_s: 43200

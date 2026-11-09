@@ -67,6 +67,7 @@ class EvoPromptingController(BaseController):
         temperature = self.rng(round_, "temperature").choice(TEMPERATURES)
         arch, why, _ = ask_architecture(
             self.client, "evoprompting", EVOPROMPTING_SYSTEM, prompt, self.task, tried, temperature=temperature,
+            record=self.proposal_attempts,
             mock_fn=lambda att: mock_neighbour(parents[0].architecture, self.task, tried,
                                                self.rng(round_, f"mock{att}")))
         if arch is None:

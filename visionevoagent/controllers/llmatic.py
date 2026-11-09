@@ -46,7 +46,10 @@ class LLMaticController(BaseController):
     def _net_cell(self, t: Trial, base_params: float) -> str:
         dp = abs((t.params or base_params) - base_params)
         size = "small" if dp < self.param_bins[0] else ("medium" if dp < self.param_bins[1] else "large")
-        return f"{size}|{t.architecture['target_stage']}"
+        a = t.architecture
+        # second descriptor: where the modules act; NAS-Bench-201 has no stages -> number of conv edges
+        where = a["target_stage"] if "target_stage" in a else f"conv{sum(v.startswith('nor_conv') for v in a.values())}"
+        return f"{size}|{where}"
 
     def _net_archive(self) -> Dict[str, Dict[str, Any]]:
         return self.state.setdefault("network_archive", {})
@@ -90,6 +93,7 @@ class LLMaticController(BaseController):
                                               b=fmt_arch(parents[1].architecture))
         arch, why, _ = ask_architecture(
             self.client, f"llmatic_{op}", LLMATIC_SYSTEM, prompt, self.task, tried, **self._call_kwargs(level),
+            record=self.proposal_attempts,
             mock_fn=lambda att: mock_neighbour(parents[0].architecture, self.task, tried,
                                                self.rng(round_, f"mock{att}")))
         self.state.setdefault("pending", {})[str(round_)] = {"op": op, "instruction": instr, "level": level,
