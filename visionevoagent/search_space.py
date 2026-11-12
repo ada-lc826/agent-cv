@@ -78,7 +78,26 @@ PROFILES: Dict[str, Dict] = {
     },
 }
 
+# Task-specific wording on top of the profile (2026-11-12): the segmentation plugin (plugins/mmseg_evo.py)
+# realises some choices differently from classification, and the prompts must describe what is trained.
+TASK_NOTES: Dict[str, Dict[str, str]] = {
+    "segmentation": {
+        "dilated": "the existing 3x3 conv2 keeps its pretrained weights and doubles its dilation "
+                   "(the R-50-D8 backbone already uses dilation 2 / 4 in stages 3 / 4)",
+        "depthwise": "depthwise-separable 3x3 conv replacing conv2 (fewer params; this conv is newly "
+                     "initialised, not ImageNet-pretrained)",
+        "weighted": "learnable weighted fusion of the low-level stage-1 features and the ASPP output in the "
+                    "DeepLabV3+ decoder (equal weights = the original head)",
+    },
+}
+TASK_SPACE_NOTE: Dict[str, str] = {
+    "segmentation": ("Semantic segmentation on Cityscapes with DeepLabV3+ and an ImageNet-pretrained ResNet-50-D8 "
+                     "backbone (ResNetV1c); the score is mIoU of a short fine-tuning proxy. Attention modules "
+                     "are inserted after the last BN of each Bottleneck of the selected stages."),
+}
+
 ACTIVE = "modules"
+ACTIVE_TASK = "classification"
 DIMENSIONS: List[str] = list(PROFILES["modules"]["dimensions"])
 BASELINE: Architecture = dict(PROFILES["modules"]["baseline"])
 MODULE_NOTES: Dict[str, str] = dict(PROFILES["modules"]["notes"])
@@ -90,7 +109,7 @@ def profile_of(task: str) -> str:
 
 def activate(task: str) -> str:
     """Make the space of `task` the active one (in place, so imported names follow). Returns the profile."""
-    global ACTIVE
+    global ACTIVE, ACTIVE_TASK
     get_search_space(task)
     name = profile_of(task)
     prof = PROFILES[name]
@@ -99,12 +118,13 @@ def activate(task: str) -> str:
     BASELINE.update(prof["baseline"])
     MODULE_NOTES.clear()
     MODULE_NOTES.update(prof["notes"])
-    ACTIVE = name
+    MODULE_NOTES.update(TASK_NOTES.get(task, {}))
+    ACTIVE, ACTIVE_TASK = name, task
     return name
 
 
 def space_note() -> str:
-    return PROFILES[ACTIVE]["space_note"]
+    return TASK_SPACE_NOTE.get(ACTIVE_TASK, PROFILES[ACTIVE]["space_note"])
 
 
 def get_search_space(task: str) -> Dict[str, List[str]]:

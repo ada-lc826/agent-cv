@@ -4,8 +4,8 @@
 #            --score_table runs/score_table_seg/score_table.json --mode agent_reflect --seed 0 --max_rounds 20
 search:
   max_rounds: 20
-  min_improvement: 0.30      # PLACEHOLDER: replace with the measured proxy seed sd (mIoU points)
-  noise_level: 0.30          # PLACEHOLDER: idem
+  min_improvement: 0.44      # measured 2026-11-12: sd (ddof 1) of 4 baseline runs of the 4k proxy
+  noise_level: 0.44          # (69.97, 69.40, 68.92, 69.62 mIoU; the two seed-0 runs differ by 0.57)
   early_stop_patience: 0
   max_consecutive_failures: 5
 

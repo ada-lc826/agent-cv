@@ -23,7 +23,9 @@ class ScoreTableMissing(RuntimeError):
 class TableRunner(BaseRunner):
     metric = "top1"
 
-    def __init__(self, path: str, seed: int):
+    def __init__(self, path: str, seed: int, metric: Optional[str] = None):
+        if metric:  # segmentation tables hold mIoU (2026-11-12); classification and NB201 keep "top1"
+            self.metric = metric
         with open(path, encoding="utf-8") as f:
             table = json.load(f)
         self.meta: Dict[str, Any] = table.get("meta", {})

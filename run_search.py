@@ -209,7 +209,8 @@ def main(argv=None) -> int:
         runner = MockRunner(seed=a.seed, noise_std=scfg.noise_level * 0.75)
     elif a.score_table:
         from visionevoagent.runners.table_runner import TableRunner
-        runner = TableRunner(a.score_table, a.seed if a.table_seed is None else a.table_seed)
+        runner = TableRunner(a.score_table, a.seed if a.table_seed is None else a.table_seed,
+                             metric="mIoU" if a.task == "segmentation" else None)
     else:
         from visionevoagent.runners.factory import make_runner
         runner = make_runner(a.task, yr, seed=a.seed, work_root=yr.get("work_root") or os.path.join(run_dir, "trials"))

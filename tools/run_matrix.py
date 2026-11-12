@@ -80,7 +80,8 @@ def run_dir_of(mode, flags, seed, max_rounds, runs_root, task="classification"):
 def fill(flags, seed, a):
     """{source}: principle memory of the same seed's agent_reflect run on --source_task (transfer set)."""
     src = os.path.join(a.transfer_from or a.runs_root,
-                       f"{a.source_task}_agent_reflect_t{a.max_rounds}_s{seed}", "principle_memory.json")
+                       f"{a.source_task}_agent_reflect_t{a.source_rounds or a.max_rounds}_s{seed}",
+                       "principle_memory.json")
     return [f.replace("{source}", src) for f in flags]
 
 
@@ -109,12 +110,20 @@ def main() -> None:
                    help="number of training seeds in the table; search seed s reads table seed s %% N (0: same)")
     p.add_argument("--transfer_from", default="", help="runs dir of the source task (transfer set)")
     p.add_argument("--source_task", default="nb201_cifar10")
+    p.add_argument("--source_rounds", type=int, default=0,
+                   help="rounds of the source runs if they differ from --max_rounds (segmentation: 20 rounds "
+                        "transferring from the 30-round classification runs)")
+    p.add_argument("--only_methods", nargs="+", default=[],
+                   help="keep only these modes from the chosen sets (segmentation: Random, Reg-Evo, ours and "
+                        "the two LLM methods picked by tools/select_seg_methods.py)")
     p.add_argument("--list", action="store_true")
     a = p.parse_args()
 
     jobs = []
     for s in a.set:
         for mode, flags in SETS[s]:
+            if a.only_methods and mode not in a.only_methods:
+                continue
             for seed in a.seeds:  # seed-major order would finish whole methods first; interleave seeds instead
                 f = fill(flags, seed, a)
                 d = run_dir_of(mode, f, seed, a.max_rounds, a.runs_root, a.task)
