@@ -14,6 +14,9 @@ Sets (final_experiment_plan sections 4.1-4.2):
   nader_orig NADER with its original 90%-of-parent reflection threshold
   nb201_ablation  agent_reflect with D-9 random / D-10 no_update / D-11 / D-12 (NAS-Bench-201, 2026-10-30;
              D-8 needs hand-written principles for the space and is not run there)
+  judge      agent_reflect with D-13 llm_evidence / D-14 llm_confidence (2026-11-12): the Reflector, not the
+             evidence model, sets each principle's confidence; audit them with tools/audit_principles.py
+             next to the full method (same runs glob), any task
   transfer   agent_reflect started from random principles, or from the principles that the agent_reflect
              run of the same seed learned on another task (--transfer_from <runs dir of that task>)
 
@@ -64,6 +67,10 @@ SETS = {
         ["--selection", "llm"],                  # D-11
         ["--reflection_version", "v3"],          # D-12
     )],
+    "judge": [("agent_reflect", f) for f in (
+        ["--principle_mode", "llm_evidence"],    # D-13: the Reflector's verdicts + eta rule set the confidence
+        ["--principle_mode", "llm_confidence"],  # D-14: the Reflector states the confidence
+    )],
     "transfer": [("agent_reflect", ["--init_principles", "random"]),
                  ("agent_reflect", ["--init_principles", "{source}"])],
 }
@@ -80,7 +87,8 @@ def run_dir_of(mode, flags, seed, max_rounds, runs_root, task="classification"):
 def fill(flags, seed, a):
     """{source}: principle memory of the same seed's agent_reflect run on --source_task (transfer set)."""
     src = os.path.join(a.transfer_from or a.runs_root,
-                       f"{a.source_task}_agent_reflect_t{a.max_rounds}_s{seed}", "principle_memory.json")
+                       f"{a.source_task}_agent_reflect_t{a.source_rounds or a.max_rounds}_s{seed}",
+                       "principle_memory.json")
     return [f.replace("{source}", src) for f in flags]
 
 
@@ -109,12 +117,20 @@ def main() -> None:
                    help="number of training seeds in the table; search seed s reads table seed s %% N (0: same)")
     p.add_argument("--transfer_from", default="", help="runs dir of the source task (transfer set)")
     p.add_argument("--source_task", default="nb201_cifar10")
+    p.add_argument("--source_rounds", type=int, default=0,
+                   help="rounds of the source runs if they differ from --max_rounds (segmentation: 20 rounds "
+                        "transferring from the 30-round classification runs)")
+    p.add_argument("--only_methods", nargs="+", default=[],
+                   help="keep only these modes from the chosen sets (segmentation: Random, Reg-Evo, ours and "
+                        "the two LLM methods picked by tools/select_seg_methods.py)")
     p.add_argument("--list", action="store_true")
     a = p.parse_args()
 
     jobs = []
     for s in a.set:
         for mode, flags in SETS[s]:
+            if a.only_methods and mode not in a.only_methods:
+                continue
             for seed in a.seeds:  # seed-major order would finish whole methods first; interleave seeds instead
                 f = fill(flags, seed, a)
                 d = run_dir_of(mode, f, seed, a.max_rounds, a.runs_root, a.task)

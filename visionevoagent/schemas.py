@@ -143,11 +143,33 @@ def _claim_schema(task: str) -> Dict[str, Any]:
             "required": ["condition", "reference", "direction", "min_effect"], "additionalProperties": False}
 
 
-def reflection_schema(task: str, with_hypotheses: bool = False, computed_evidence: bool = False) -> Dict[str, Any]:
+# Control "who judges the evidence" (2026-11-12): the hypothesis-guided framework unchanged, except that the
+# Reflector scores the principles itself instead of the evidence model.
+#   "evidence"    supports / contradicts / neutral with a strength, turned into the confidence by the eta
+#                 rule (HypoExplore, reflection v2)
+#   "confidence"  the Reflector states the probability that each claim holds
+JUDGE_MODES = ("", "evidence", "confidence")
+
+_PRINCIPLE_CONFIDENCE = {
+    "type": "object",
+    "properties": {
+        "principle_id": {"type": "string"},
+        "confidence": {"type": "number"},      # probability in [0, 1] that the claim holds
+        "reason": {"type": "string"},
+    },
+    "required": ["principle_id", "confidence", "reason"],
+    "additionalProperties": False,
+}
+
+
+def reflection_schema(task: str, with_hypotheses: bool = False, computed_evidence: bool = False,
+                      judge: str = "") -> Dict[str, Any]:
     """v1: REFLECTION_SCHEMA. v2 (with_hypotheses): the Reflector must also propose 1-3 untested
     architectures ("untested_combinations") that test its principles or combine promising changes.
     v3 (computed_evidence): no principle_updates (the system computes confidence from the trials); every
-    new principle carries a machine-checkable `claim`; every hypothesis a `predicted_delta`."""
+    new principle carries a machine-checkable `claim`; every hypothesis a `predicted_delta`.
+    judge (JUDGE_MODES, with computed_evidence): "evidence" keeps principle_updates; "confidence" asks for
+    principle_confidences and a confidence on every new principle."""
     if not with_hypotheses and not computed_evidence:
         return REFLECTION_SCHEMA
     space = get_search_space(task)
@@ -169,12 +191,18 @@ def reflection_schema(task: str, with_hypotheses: bool = False, computed_evidenc
             "type": "object", "properties": hyp_props, "required": hyp_req, "additionalProperties": False}}
         required.append("untested_combinations")
     if computed_evidence:
-        props.pop("principle_updates")
-        required.remove("principle_updates")
+        new_props = {**_NEW_PRINCIPLE["properties"], "claim": _claim_schema(task)}
+        new_required = list(PRINCIPLE_FIELDS) + ["claim"]
+        if judge != "evidence":
+            props.pop("principle_updates")
+            required.remove("principle_updates")
+        if judge == "confidence":
+            props["principle_confidences"] = {"type": "array", "items": _PRINCIPLE_CONFIDENCE}
+            required.append("principle_confidences")
+            new_props["confidence"] = {"type": "number"}
+            new_required.append("confidence")
         props["new_principles"] = {"type": "array", "items": {
-            "type": "object",
-            "properties": {**_NEW_PRINCIPLE["properties"], "claim": _claim_schema(task)},
-            "required": list(PRINCIPLE_FIELDS) + ["claim"], "additionalProperties": False}}
+            "type": "object", "properties": new_props, "required": new_required, "additionalProperties": False}}
     return {**REFLECTION_SCHEMA, "properties": props, "required": required}
 
 
@@ -203,11 +231,28 @@ def validate_design(obj: Any, task: str) -> Optional[str]:
 
 
 def validate_reflection(obj: Any, task: str = "", with_hypotheses: bool = False,
-                        computed_evidence: bool = False) -> Optional[str]:
+                        computed_evidence: bool = False, judge: str = "") -> Optional[str]:
     if not isinstance(obj, dict):
         return _err("response is not an object")
+    if computed_evidence and judge == "confidence":  # control: the Reflector states the probabilities
+        pcs = obj.get("principle_confidences")
+        if not isinstance(pcs, list):
+            return _err("principle_confidences must be a list")
+        for u in pcs:
+            if not isinstance(u, dict) or not isinstance(u.get("principle_id"), str):
+                return _err("bad item in principle_confidences")
+            c = u.get("confidence")
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not 0.0 <= float(c) <= 1.0:
+                return _err("confidence out of [0,1] in principle_confidences")
+        for p in obj.get("new_principles") if isinstance(obj.get("new_principles"), list) else []:
+            c = p.get("confidence") if isinstance(p, dict) else None
+            if c is None:  # not stated: the principle starts at 0.5 like any other
+                continue
+            if isinstance(c, bool) or not isinstance(c, (int, float)) or not 0.0 <= float(c) <= 1.0:
+                return _err("the confidence of a new principle must be in [0,1]")
     if computed_evidence:  # v3: evidence is computed by the system; the field is not asked for
-        obj.setdefault("principle_updates", [])
+        if judge != "evidence":  # control "evidence": the Reflector's verdicts are required
+            obj.setdefault("principle_updates", [])
         from .evidence import validate_claim
         # a principle whose claim cannot be checked is dropped (and recorded), not the whole reflection
         keep, dropped = [], []

@@ -16,6 +16,13 @@ Controls for "do the principles matter, and does online updating matter" (adviso
                               never updated, no new principles
   principle_mode="random"     randomly generated principles in the same format, never updated
   principle_mode="no_update"  principles are induced as usual but their confidence never moves
+Control for "who judges the evidence" (2026-11-12; hypothesis-guided framework only). Claims, candidates,
+pair evidence and selection are unchanged; only the source of a principle's confidence differs, and the
+Reflector sees no output of the evidence model (the model still predicts the candidates' gain):
+  principle_mode="llm_evidence"    D-13: the Reflector reports supports / contradicts / neutral with a
+                                   strength for the new trials; the eta rule turns it into the confidence
+                                   (HypoExplore's update, reflection v2's judge)
+  principle_mode="llm_confidence"  D-14: the Reflector states the probability that each claim holds
 Reflection v2 (2026-10-20, after the pilot showed Agent and Agent+Reflector making the same choices;
 full style only):
   design_view="reflection_only"  the Design Agent sees the Reflector's summary instead of the raw history
@@ -61,7 +68,8 @@ from .base import BaseController, Proposal
 log = logging.getLogger(__name__)
 
 REFLECTION_STYLES = ("full", "rule", "immediate")
-PRINCIPLE_MODES = ("online", "fixed", "random", "no_update")
+LLM_JUDGE_MODES = {"llm_evidence": "evidence", "llm_confidence": "confidence"}   # -> ReflectionContext.judge
+PRINCIPLE_MODES = ("online", "fixed", "random", "no_update") + tuple(LLM_JUDGE_MODES)
 DESIGN_VIEWS = ("full_history", "reflection_only")
 EVIDENCE_MODES = ("computed", "llm")
 
@@ -79,7 +87,7 @@ class AgentSearchConfig:
     explore_every: int = 4              # every k-th round is an exploration round (0 = never)
     max_principles_in_prompt: int = 8
     show_param_costs: bool = True       # per-candidate parameter-cost table in the design prompt
-    principle_mode: str = "online"      # online | fixed | random | no_update (see module docstring)
+    principle_mode: str = "online"      # online | fixed | random | no_update | llm_evidence | llm_confidence
     # reflection v2 (see module docstring); v1 = full_history, False, None (memory.ETA = 0.2), 0.0
     design_view: str = "reflection_only"     # full_history | reflection_only
     propose_hypotheses: bool = False         # v2/v3: the Reflector proposes untested combinations
@@ -128,6 +136,11 @@ class AgentSearchController(BaseController):
             raise ValueError(f"evidence_mode must be one of {EVIDENCE_MODES}")
         if cfg.selection not in SELECTION_MODES:
             raise ValueError(f"selection must be one of {SELECTION_MODES}")
+        if cfg.use_reflection and cfg.principle_mode in LLM_JUDGE_MODES and not (
+                cfg.reflection_style == "full" and cfg.use_principle_memory and cfg.evidence_mode == "computed"
+                and cfg.selection in ("guided", "llm")):
+            raise ValueError(f"principle_mode {cfg.principle_mode} is a control of the hypothesis-guided "
+                             "framework (full reflection, principle memory, claims, candidate selection)")
         self.design = design
         self.reflector = reflector
         self.cfg = cfg
@@ -185,7 +198,7 @@ class AgentSearchController(BaseController):
         if self._computed() and p.claim:
             from ..evidence import claim_text
             e["claim"] = claim_text(p.claim)
-            if p.stats:
+            if p.stats and not self._judge():  # LLM-judged controls: no evidence-model statistics per principle
                 e["effect_estimate"] = f"{p.stats['effect_mean']:+.2f} +- {p.stats['effect_sd']:.2f}"
                 e["direct_trials"] = p.stats.get("n_direct", 0)
         else:
@@ -247,8 +260,13 @@ class AgentSearchController(BaseController):
         return self.cfg.reflection_style == "full" and self.cfg.use_principle_memory
 
     def _learns_principles(self) -> bool:
-        """The Reflector's principle output is written back to memory (online and no_update only)."""
-        return self._uses_principle_memory() and self.cfg.principle_mode in ("online", "no_update")
+        """The Reflector's principle output is written back to memory (not for fixed / random)."""
+        return self._uses_principle_memory() and (self.cfg.principle_mode in ("online", "no_update")
+                                                  or self.cfg.principle_mode in LLM_JUDGE_MODES)
+
+    def _judge(self) -> str:
+        """"" (the evidence model sets the confidence) | "evidence" | "confidence" (the Reflector does)."""
+        return LLM_JUDGE_MODES.get(self.cfg.principle_mode, "") if self._guided() else ""
 
     def propose(self, memory: ArchitectureMemory, round_: int) -> Proposal:
         mode = self._search_mode(round_)
@@ -367,16 +385,20 @@ class AgentSearchController(BaseController):
             if keep and self.cfg.principle_mode == "online":
                 memory.recompute_confidence(self._fit(memory), round_)  # the Reflector sees current values
             model = self._fit(memory)
+        judge = self._judge() if keep else ""
+        previous = [asdict(p) for p in memory.active_principles()] if keep else []
+        if judge:  # the judge may also revise a principle it refuted; it sees no evidence-model statistics
+            previous = [{**asdict(p), "stats": {}} for p in sorted(memory.principles, key=lambda p: -p.confidence)]
         ctx = ReflectionContext(
             task=self.task, metric=self.metric, baseline=baseline_info(memory),
             best=best_info(memory), history=history[-1:] if immediate else history, new_trials=new_trials,
             failed=[] if immediate or not self.cfg.use_failure_memory else [asdict(f) for f in memory.failures],
             noise_level=self.noise_level,
-            previous_principles=[asdict(p) for p in memory.active_principles()] if keep else [],
+            previous_principles=previous,
             propose_hypotheses=self._v2() and self.cfg.propose_hypotheses,
             tried=sorted(memory.tried_signatures()),
             computed_evidence=computed, evidence_table=model.table(self.task) if model is not None else None,
-            model=model, library=self._guided())
+            model=model, library=self._guided(), judge=judge)
         ref = self.reflector.reflect(ctx)
         if ref is None:
             log.warning("round %d: reflection failed, keeping previous knowledge", round_)
@@ -390,11 +412,30 @@ class AgentSearchController(BaseController):
         """Evidence updates (one per principle per reflection, unknown ids ignored), then new principles.
         no_update: the updates are recorded in the reflection but not applied, so confidence stays 0.5."""
         updated, ignored = [], []
+        judge = self._judge()
+        if judge:  # control: the Reflector's own judgement scores the existing principles, not the model
+            for u in ref["principle_updates"] if judge == "evidence" else ref.get("principle_confidences", []):
+                pid = u["principle_id"]
+                if pid in updated:
+                    ignored.append(pid)
+                    continue
+                if judge == "evidence":
+                    p = memory.update_principle(pid, u["evidence"], u["strength"], round_,
+                                                reason=u.get("reason", ""), trials=u.get("trials", ""),
+                                                eta=self.cfg.confidence_eta, floor=self.cfg.min_evidence_strength,
+                                                count=False)
+                else:
+                    p = memory.set_confidence(pid, u["confidence"], round_, reason=u.get("reason", ""))
+                (updated if p is not None else ignored).append(pid)
         if self._computed():  # v3: add the conjectures, then let the data score every claim
             before = {p.id for p in memory.principles}
             added = [memory.add_principle(f, self.task, round_, claim=f.get("claim"), restate_bonus=False).id
                      for f in ref["new_principles"]]
             new_ids = set(added) - before
+            if judge == "confidence":  # a new principle starts at the probability the Reflector gave it
+                for f, pid in zip(ref["new_principles"], added):
+                    if pid in new_ids and f.get("confidence") is not None:
+                        memory.set_confidence(pid, f["confidence"], round_, reason="stated with the principle")
             if self._guided() and new_ids:  # past parent -> child comparisons bear on the new principles too
                 for t in memory.trials:
                     if t.parent and t.round <= round_:
@@ -402,7 +443,8 @@ class AgentSearchController(BaseController):
                                                     ids=new_ids, backfill=True)
             if self.cfg.principle_mode == "online":
                 updated = memory.recompute_confidence(self._fit(memory), round_)
-            return {"updated": updated, "ignored": [], "added": added, "evidence": "computed"}
+            return {"updated": updated, "ignored": ignored, "added": added,
+                    "evidence": "llm_" + judge if judge else "computed"}
         if self.cfg.principle_mode == "no_update":
             added = [memory.add_principle(f, self.task, round_, already_updated={p.id for p in memory.principles}).id
                      for f in ref["new_principles"]]
