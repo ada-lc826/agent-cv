@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..agent_client import AgentClient, AgentClientError, AgentClientFatal
 from ..memory import render_principle
 from ..prompts import (REFLECTOR_HYPOTHESES_ADDENDUM, REFLECTOR_SYSTEM, REFLECTOR_SYSTEM_V3, REFLECTOR_SYSTEM_V4,
-                       build_reflection_prompt)
+                       REFLECTOR_SYSTEM_V4_JUDGE, build_reflection_prompt)
 from ..schemas import reflection_schema, validate_reflection
 from ..search_space import (DIMENSIONS, all_architectures, architecture_signature,
                             count_architecture_difference, get_search_space)
@@ -38,6 +38,10 @@ class ReflectionContext:
     evidence_table: Optional[List[Dict[str, Any]]] = None
     model: Any = None                         # evidence.EvidenceModel (used by the dry-run mock only)
     library: bool = False                     # v4: verifiable principle library (pair evidence, conditional refinement)
+    # control "who judges the evidence" (schemas.JUDGE_MODES; v4 only): "" = the evidence model (default),
+    # "evidence" = the Reflector's supports / contradicts verdicts, "confidence" = its stated probabilities.
+    # The Reflector then sees no output of the evidence model.
+    judge: str = ""
 
 
 class ReflectorAgent:
@@ -53,13 +57,16 @@ class ReflectorAgent:
             history=ctx.history, new_trials=ctx.new_trials, best=ctx.best, failed=ctx.failed,
             noise_level=ctx.noise_level, previous_principles=ctx.previous_principles,
             tried=ctx.tried if ctx.propose_hypotheses else None,
-            evidence_table=(ctx.evidence_table or []) if ctx.computed_evidence else None)
-        if ctx.computed_evidence:
+            evidence_table=(ctx.evidence_table or []) if ctx.computed_evidence and not ctx.judge else None,
+            judge=ctx.judge)
+        if ctx.computed_evidence and ctx.judge:
+            system = REFLECTOR_SYSTEM_V4_JUDGE[ctx.judge]
+        elif ctx.computed_evidence:
             system = REFLECTOR_SYSTEM_V4 if ctx.library else REFLECTOR_SYSTEM_V3
         else:
             system = REFLECTOR_SYSTEM + (REFLECTOR_HYPOTHESES_ADDENDUM if ctx.propose_hypotheses else "")
         schema = reflection_schema(ctx.task, with_hypotheses=ctx.propose_hypotheses,
-                                   computed_evidence=ctx.computed_evidence)
+                                   computed_evidence=ctx.computed_evidence, judge=ctx.judge)
         feedback, pending = "", None   # pending: last valid reflection whose hypotheses were partly unusable
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -71,7 +78,7 @@ class ReflectorAgent:
                 log.warning("reflector call failed (attempt %d): %s", attempt, e)
                 continue
             reason = validate_reflection(out, ctx.task, with_hypotheses=ctx.propose_hypotheses,
-                                         computed_evidence=ctx.computed_evidence)
+                                         computed_evidence=ctx.computed_evidence, judge=ctx.judge)
             if reason is not None:
                 log.warning("reflection rejected (attempt %d): %s", attempt, reason)
                 continue
@@ -165,7 +172,16 @@ class ReflectorAgent:
             "data_sufficiency": "insufficient" if n < 4 else ("limited" if n < 12 else "adequate"),
         }
         if ctx.computed_evidence:  # v3: claims instead of evidence judgements; one interaction conjecture
-            del out["principle_updates"]
+            if ctx.judge != "evidence":  # control "evidence" keeps the mock verdicts
+                del out["principle_updates"]
+            if ctx.judge == "confidence":  # control "confidence": the verdicts as stated probabilities
+                conf = {p["id"]: p.get("confidence", 0.5) for p in ctx.previous_principles}
+                step = {"supports": 0.2, "contradicts": -0.2, "neutral": 0.0}
+                out["principle_confidences"] = [
+                    {"principle_id": u["principle_id"], "reason": u["reason"],
+                     "confidence": round(min(0.99, max(0.01, conf.get(u["principle_id"], 0.5)
+                                                       + step[u["evidence"]] * u["strength"])), 3)}
+                    for u in updates]
             for p in out["new_principles"]:
                 d, v = p["if"].split("=")
                 p["claim"] = {"condition": [{"dim": d, "value": v}], "reference": [], "direction": "increase",
@@ -182,6 +198,9 @@ class ReflectorAgent:
                         "because": "mock: complementary mechanisms", "disproved_if": "the joint change does not beat the baseline",
                         "claim": {"condition": cond, "reference": [], "direction": "increase", "min_effect": 2 * noise}})
                     break
+            if ctx.judge == "confidence":
+                for p in out["new_principles"]:
+                    p["confidence"] = 0.6
         if ctx.propose_hypotheses:  # untried architectures within 2 dimensions of the best
             tried = set(ctx.tried or [])
             cands = [a for a in all_architectures(ctx.task) if architecture_signature(a) not in tried

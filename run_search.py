@@ -10,6 +10,9 @@ Ablations of VisionEvoAgent (each gets its own run directory automatically):
     --no_failure_memory  --no_principle_memory  --reflection_style rule|immediate  --no_param_costs
     --mutation_budget 4  --explore_every 0  --reflect_every_n 1|2|4
     --principle_mode fixed|random|no_update        (do the principles / online updates matter?)
+    --principle_mode llm_evidence|llm_confidence   (who judges the evidence? the Reflector instead of the
+                              evidence model: supports / contradicts verdicts with the eta rule, or its own
+                              stated probability; v4 only, everything else unchanged)
     --init_principles <run>/principle_memory.json | random   (transfer vs random initialisation)
     default (v4): hypothesis-guided framework -- Design Agent proposes candidates with expected improvements,
                               selection by expected gain / principle uncertainty / verification value,
@@ -33,7 +36,7 @@ import sys
 
 from visionevoagent.agent_client import AgentClient, AgentClientConfig
 from visionevoagent.agents import DesignAgent, ReflectorAgent
-from visionevoagent.controllers.agent_search import PRINCIPLE_MODES
+from visionevoagent.controllers.agent_search import LLM_JUDGE_MODES, PRINCIPLE_MODES
 from visionevoagent.principle_controls import random_principles
 from visionevoagent.controllers import (REFLECTION_STYLES, AgentSearchConfig, AgentSearchController,
                                         EvoPromptingController, GeniusController, LAPTController,
@@ -86,7 +89,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="ablations D-6 (rule) and D-7 (immediate); default full")
     p.add_argument("--no_param_costs", action="store_true", help="Design Agent without the cost table")
     p.add_argument("--principle_mode", choices=PRINCIPLE_MODES,
-                   help="online (default) | fixed | random | no_update control experiments")
+                   help="online (default) | fixed | random | no_update control experiments; llm_evidence | "
+                        "llm_confidence: the Reflector, not the evidence model, sets the confidence")
     p.add_argument("--fixed_principles", default="configs/principles_fixed_cls.json",
                    help="principle file for --principle_mode fixed")
     p.add_argument("--selection", choices=("guided", "llm"),
@@ -182,6 +186,11 @@ def main(argv=None) -> int:
     pmode = a.principle_mode or ya.get("search", {}).get("principle_mode", "online")
     if a.init_principles and pmode in ("fixed", "random"):
         raise SystemExit("--init_principles cannot be combined with --principle_mode fixed/random")
+    if a.mode == "agent_reflect" and pmode in LLM_JUDGE_MODES and (
+            a.reflection_version in ("v1", "v2", "v3") or a.no_principle_memory
+            or (a.reflection_style or "full") != "full"):
+        raise SystemExit(f"--principle_mode {pmode} is a control of the default (v4) framework; it cannot be "
+                         "combined with --reflection_version v1/v2/v3, --no_principle_memory or --reflection_style")
     if a.init_principles == "random":
         if a.mode != "agent_reflect":
             raise SystemExit("--init_principles random is only defined for agent_reflect")

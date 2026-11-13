@@ -93,6 +93,8 @@ export PYTHONPATH=$PWD
    | D-8 fixed principles: generic ones from the module papers (`configs/principles_fixed_cls.json`), never updated | `--principle_mode fixed` |
    | D-9 random principles in the same format, never updated | `--principle_mode random` |
    | D-10 principles induced as usual, confidence never updated | `--principle_mode no_update` |
+   | D-13 who judges the evidence: the Reflector reports supports / contradicts / neutral with a strength and the eta rule (0.35, floor 0.5) sets the confidence, as in HypoExplore; claims, candidates, pair evidence and selection unchanged; the Reflector sees no output of the evidence model | `--principle_mode llm_evidence` |
+   | D-14 as D-13, but the Reflector states the probability that each claim holds | `--principle_mode llm_confidence` |
    | Pilot reflection (v1): Design Agent sees the full history, no untested combinations, LLM-judged evidence with eta 0.2, reflect every 2 rounds | `--reflection_version v1` |
    | Reflection v2: Design Agent sees only the Reflector summary + tried list, Reflector proposes 1-3 untested combinations (<= 2 dims from the best), LLM-judged evidence with eta 0.35 and strength floor 0.5 | `--reflection_version v2` |
    | Default v3: as v2, but every principle carries a machine-checkable claim and its confidence is computed from all trials by a Bayesian linear model with the measured noise (`visionevoagent/evidence.py`); the Reflector predicts each hypothesis's delta, and the summary reports prediction accuracy | (default) |

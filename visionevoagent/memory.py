@@ -241,10 +241,12 @@ class ArchitectureMemory:
 
     def update_principle(self, pid: str, evidence: str, strength: float, round_: int,
                          reason: str = "", trials: str = "", eta: Optional[float] = None,
-                         floor: float = 0.0) -> Optional[Principle]:
+                         floor: float = 0.0, count: bool = True) -> Optional[Principle]:
         """Apply one piece of evidence. Returns None for an unknown id. Neutral evidence is logged only.
         `eta` overrides the module-level ETA; `floor` is a minimum strength for supports / contradicts
-        (v2 reflection: weak non-neutral evidence still moves the confidence noticeably)."""
+        (v2 reflection: weak non-neutral evidence still moves the confidence noticeably).
+        count=False (LLM-judged control of the hypothesis-guided framework): the support / contradict
+        counters stay what they are there, the numbers of parent -> child comparisons."""
         p = self.principle(pid)
         if p is None or evidence not in ("supports", "contradicts", "neutral"):
             return None
@@ -255,16 +257,30 @@ class ArchitectureMemory:
         before = p.confidence
         if evidence == "supports":
             p.confidence = before + eta * s * (1.0 - before)
-            p.support_count += 1
+            p.support_count += 1 if count else 0
         elif evidence == "contradicts":
             p.confidence = before - eta * s * before
-            p.contradict_count += 1
+            p.contradict_count += 1 if count else 0
         else:
-            p.neutral_count += 1
+            p.neutral_count += 1 if count else 0
         p.confidence = round(min(CONF_BOUNDS[1], max(CONF_BOUNDS[0], p.confidence)), 4)
         p.status = _status(p.confidence)
         p.last_round = round_
         p.evidence.append({"round": round_, "type": evidence, "strength": round(s, 3), "trials": trials,
+                           "reason": reason, "before": before, "after": p.confidence})
+        return p
+
+    def set_confidence(self, pid: str, confidence: float, round_: int, reason: str = "") -> Optional[Principle]:
+        """LLM-stated confidence (control principle_mode="llm_confidence"): the Reflector's own probability
+        that the claim holds replaces the stored value. Returns None for an unknown id or a non-number."""
+        p = self.principle(pid)
+        if p is None or isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return None
+        before = p.confidence
+        p.confidence = round(min(CONF_BOUNDS[1], max(CONF_BOUNDS[0], float(confidence))), 4)
+        p.status = _status(p.confidence)
+        p.last_round = round_
+        p.evidence.append({"round": round_, "type": "llm_confidence", "strength": None, "trials": "",
                            "reason": reason, "before": before, "after": p.confidence})
         return p
 

@@ -115,8 +115,53 @@ _V3_TAIL = """General rules:
 - With few or noisy trials, set data_sufficiency accordingly.
 Return JSON only."""
 
+_V3_BASE = REFLECTOR_SYSTEM_V3   # the part shared by v3, v4 and the LLM-judged controls below
 REFLECTOR_SYSTEM_V4 = REFLECTOR_SYSTEM_V3 + _V4_LIBRARY + _V3_TAIL
 REFLECTOR_SYSTEM_V3 = REFLECTOR_SYSTEM_V3 + _V3_HYPOTHESES + _V3_TAIL
+
+# Control "who judges the evidence" (2026-11-12, principle_mode llm_evidence / llm_confidence): the v4
+# prompt with the paragraph "You do NOT judge evidence ..." replaced by one of the two below. The Reflector
+# sees the trials and each principle's supporting cases and counterexamples, but no output of the evidence
+# model (no EVIDENCE_TABLE, no effect estimates): nothing but its own judgement scores the principles.
+_JUDGE_EVIDENCE = """You JUDGE the evidence; no statistical model scores the principles. For every existing principle that \
+the NEW TRIALS bear on, report in principle_updates whether they support it, contradict it or are neutral, \
+with a strength in [0, 1]. The system turns your verdicts into the principle's confidence (supporting \
+evidence raises it, contradicting evidence lowers it); above 0.75 a principle counts as confirmed, below \
+0.25 as refuted.
+Evidence rules:
+- Use only the NEW TRIALS SINCE THE LAST REFLECTION as evidence; earlier trials were already counted \
+(each principle lists the rounds it was updated in). Give at most one update per principle.
+- A difference within NOISE_LEVEL is neutral. Strength 0.3-0.6 for a difference between 1x and 2x \
+NOISE_LEVEL or a single trial; 0.7-1.0 for more than 2x NOISE_LEVEL or consistent evidence from several trials.
+- Name the rounds in "trials" and explain in one sentence in "reason".
+Do not restate a principle that is already decided; propose principles about what is still uncertain or \
+untested, in particular interactions (two choices that may help or hurt together more than separately).
+"""
+
+_JUDGE_CONFIDENCE = """You JUDGE the evidence; no statistical model scores the principles. Report in principle_confidences, \
+for every existing principle that the NEW TRIALS bear on (and any other whose confidence you would now \
+revise), your probability in [0, 1] that its claim holds: that the difference between condition and \
+reference, other dimensions equal, exceeds min_effect in the claimed direction. Give every new principle \
+a confidence in the same way. The system uses your numbers as the principles' confidence (principles you \
+do not list keep theirs); above 0.75 a principle counts as confirmed, below 0.25 as refuted.
+Evidence rules:
+- Base each number on all trials and on the principle's supporting cases and counterexamples.
+- A difference within NOISE_LEVEL (the seed noise of one training run) is not evidence, and a single \
+trial rarely decides a claim.
+- Explain each number in one sentence in "reason".
+Do not restate a principle that is already decided; propose principles about what is still uncertain or \
+untested, in particular interactions (two choices that may help or hurt together more than separately).
+"""
+
+
+def _judge_system(paragraph: str) -> str:
+    head, rest = _V3_BASE.split("You do NOT judge evidence.", 1)
+    _, tail = rest.split("Every new principle must pass all of:", 1)
+    return head + paragraph + "Every new principle must pass all of:" + tail + _V4_LIBRARY + _V3_TAIL
+
+
+REFLECTOR_SYSTEM_V4_JUDGE = {"evidence": _judge_system(_JUDGE_EVIDENCE),
+                             "confidence": _judge_system(_JUDGE_CONFIDENCE)}
 
 DESIGN_SYSTEM_V4 = """You are the Design Agent of VisionEvoAgent, a system that improves an established vision \
 model by inserting modules from a fixed search space. Each round you propose a small set of candidate \
@@ -316,12 +361,15 @@ def build_reflection_prompt(*, task: str, metric: str, space: Dict[str, List[str
                             failed: List[Dict[str, Any]], noise_level: float,
                             previous_principles: List[Dict[str, Any]],
                             tried: Optional[List[str]] = None,
-                            evidence_table: Optional[List[Dict[str, Any]]] = None) -> str:
+                            evidence_table: Optional[List[Dict[str, Any]]] = None, judge: str = "") -> str:
     computed = evidence_table is not None  # v3: the system, not the Reflector, scores the principles
     new_hdr = ("NEW TRIALS SINCE THE LAST REFLECTION" if computed
                else "NEW TRIALS SINCE THE LAST REFLECTION (the only admissible new evidence)")
     prin_hdr = ("EXISTING PRINCIPLES (confidence computed from the trials; do not restate them as new)" if computed
                 else "EXISTING PRINCIPLES (report evidence for them by id; do not restate them as new)")
+    if judge == "confidence":  # control: the Reflector states each principle's confidence itself
+        new_hdr = "NEW TRIALS SINCE THE LAST REFLECTION"
+        prin_hdr = "EXISTING PRINCIPLES (report your confidence for them by id; do not restate them as new)"
     parts = [
         f"TASK: {task} (primary metric: {metric}, higher is better)",
         f"SEARCH_SPACE:\n{_fmt_space(space)}",

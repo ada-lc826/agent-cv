@@ -14,6 +14,9 @@ Sets (final_experiment_plan sections 4.1-4.2):
   nader_orig NADER with its original 90%-of-parent reflection threshold
   nb201_ablation  agent_reflect with D-9 random / D-10 no_update / D-11 / D-12 (NAS-Bench-201, 2026-10-30;
              D-8 needs hand-written principles for the space and is not run there)
+  judge      agent_reflect with D-13 llm_evidence / D-14 llm_confidence (2026-11-12): the Reflector, not the
+             evidence model, sets each principle's confidence; audit them with tools/audit_principles.py
+             next to the full method (same runs glob), any task
   transfer   agent_reflect started from random principles, or from the principles that the agent_reflect
              run of the same seed learned on another task (--transfer_from <runs dir of that task>)
 
@@ -63,6 +66,10 @@ SETS = {
         ["--principle_mode", "no_update"],       # D-10
         ["--selection", "llm"],                  # D-11
         ["--reflection_version", "v3"],          # D-12
+    )],
+    "judge": [("agent_reflect", f) for f in (
+        ["--principle_mode", "llm_evidence"],    # D-13: the Reflector's verdicts + eta rule set the confidence
+        ["--principle_mode", "llm_confidence"],  # D-14: the Reflector states the confidence
     )],
     "transfer": [("agent_reflect", ["--init_principles", "random"]),
                  ("agent_reflect", ["--init_principles", "{source}"])],
